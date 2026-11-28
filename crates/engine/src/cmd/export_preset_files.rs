@@ -503,8 +503,14 @@ pub fn lr_export_params(v: &Lua) -> (Map<String, Value>, Vec<String>) {
     if lbool(v, "reimportExportedPhoto") == Some(true) {
         unmapped.push("add to this catalog".into());
     }
-    if lbool(v, "removeFaceMetadata") == Some(false) {
-        unmapped.push("person info (never written)".into());
+    // Remove Person Info: person keywords stay out of the files (FX-142); with it off they go out
+    // as keywords, but face regions are never written
+    match lbool(v, "removeFaceMetadata") {
+        Some(true) => {
+            o.insert("removePersonInfo".into(), json!(true));
+        }
+        Some(false) => unmapped.push("person info (face regions are never written)".into()),
+        None => {}
     }
     if lbool(v, "includeVideoFiles") == Some(false) || lstr(v, "export_videoFileHandling").is_some_and(|s| s.eq_ignore_ascii_case("exclude")) {
         unmapped.push("exclude video files".into());

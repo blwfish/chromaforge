@@ -2551,6 +2551,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Aus dem Katalog entfernen (in „Zuletzt gelöscht“; die Dateien bleiben auf dem Datenträger)",
   "Remove from the stack": "Aus dem Stapel entfernen",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "„Entfernen“ behält die Dateien auf dem Datenträger und verschiebt die Fotos nach „Zuletzt gelöscht“.",
+  "Remove person info": "Personeninformationen entfernen",
   "Remove the Surface Plugin": "Surface-Plugin entfernen",
   "Remove the strokes of both brushes": "Die Striche beider Pinsel entfernen",
   "Remove this device? It also stops syncing this catalog with it.": "Dieses Gerät entfernen? Damit endet auch die Synchronisierung dieses Katalogs mit ihm.",

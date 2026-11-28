@@ -862,6 +862,9 @@ pub struct ExportOptions {
     pub metadata: MetadataPolicy,
     /// Strip GPS / location even when the policy would include it.
     pub remove_location: bool,
+    /// Leave out keywords marked as a person (Lightroom's Remove Person Info; FX-142).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub remove_person_info: bool,
     /// Text watermark (none when absent or the text is empty).
     pub watermark: Option<Watermark>,
     /// Output colour space (AVIF is always sRGB: its muxer cannot embed a profile; lossy JPEG XL
@@ -928,6 +931,7 @@ impl Default for ExportOptions {
             dng_compression: DngCompression::Lossless,
             metadata: MetadataPolicy::All,
             remove_location: false,
+            remove_person_info: false,
             watermark: None,
             color_space: OutputSpace::Srgb,
             bit_depth: None,
@@ -980,6 +984,7 @@ pub const OPTION_PARAMS: &[&str] = &[
     "dngCompression",
     "metadata",
     "removeLocation",
+    "removePersonInfo",
     "watermark",
     "colorSpace",
     "bitDepth",
@@ -1218,7 +1223,7 @@ impl ExportOptions {
                     }
                     serde_json::from_value::<Resize>(v.clone()).map_err(|e| bad(format!("`{k}`: {e}")))?;
                 }
-                "dontEnlarge" | "removeLocation" | "background" | "hdr" | "jxlLossless" | "webpLossless" | "jxlProgressive" => {
+                "dontEnlarge" | "removeLocation" | "removePersonInfo" | "background" | "hdr" | "jxlLossless" | "webpLossless" | "jxlProgressive" => {
                     boolean(k, v)?;
                 }
                 "addToPhotos" => {
@@ -1381,7 +1386,7 @@ impl ExportOptions {
     }
 
     /// Read options from command params (`format`, `quality`, `limitKb`, `sharpen`, `sharpenAmount`,
-    /// `naming`, `metadata`, `removeLocation`, `watermark`, `colorSpace`, `bitDepth`, `ppi`,
+    /// `naming`, `metadata`, `removeLocation`, `removePersonInfo`, `watermark`, `colorSpace`, `bitDepth`, `ppi`,
     /// `addToPhotos`, `photosAlbum`) and the
     /// size: one of `longEdge`, `shortEdge`, `width`, `height` (both = fit inside W × H),
     /// `megapixels`, `percent` (absent or 0 = full size), or a [`Resize`] object as `resize`; plus
@@ -1430,6 +1435,7 @@ impl ExportOptions {
             dng_compression: enm(p, "dngCompression").unwrap_or(d.dng_compression),
             metadata: s("metadata").and_then(MetadataPolicy::parse).unwrap_or(d.metadata),
             remove_location: p.get("removeLocation").and_then(Value::as_bool).unwrap_or(d.remove_location),
+            remove_person_info: p.get("removePersonInfo").and_then(Value::as_bool).unwrap_or(d.remove_person_info),
             watermark: match p.get("watermark") {
                 Some(Value::String(t)) => Some(Watermark { text: t.clone(), ..Default::default() }),
                 Some(v @ Value::Object(_)) => watermark_from_json(v).ok(),
@@ -2230,8 +2236,15 @@ pub fn removes_location(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catal
     o.remove_location || photo.meta.gps.is_some_and(|g| catalog.is_private_location(g))
 }
 
+/// The keywords an export under `o` writes for a photo carrying `keywords`: the keyword list's
+/// options ([`lcc_catalog::Catalog::export_keywords_with`]), without people under Remove Person
+/// Info. Every file an export writes takes its keywords from here.
+pub fn export_keywords(keywords: &[String], catalog: &lcc_catalog::Catalog, o: &ExportOptions) -> lcc_catalog::keywords::ExportKeywords {
+    catalog.export_keywords_with(keywords, o.remove_person_info)
+}
+
 /// The metadata to embed for `photo` under `o.metadata` / `o.remove_location`. `None` = embed nothing.
-/// Keywords follow the catalog's keyword list (`Catalog::export_keywords`).
+/// Keywords follow the catalog's keyword list ([`export_keywords`]).
 pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalog, o: &ExportOptions) -> Option<Metadata> {
     let m = &photo.meta;
     let text = |s: &str| (!s.trim().is_empty()).then(|| s.to_string());
@@ -2269,7 +2282,7 @@ pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalo
     out.state = text(&m.state);
     out.country = text(&m.country);
     out.country_code = text(&m.country_code);
-    let keywords = catalog.export_keywords(&m.keywords);
+    let keywords = export_keywords(&m.keywords, catalog, o);
     out.keywords = keywords.flat;
     out.hierarchical_keywords = keywords.hierarchical;
     out.capture_time = photo.captured.as_deref().and_then(DateTime::parse_iso);

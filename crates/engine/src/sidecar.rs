@@ -829,8 +829,8 @@ fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: boo
     // writes the keywords its options let out
     let keywords = match export {
         None => lcc_catalog::keywords::to_file(&p.meta.keywords),
-        Some(_) => {
-            let k = cat.export_keywords(&p.meta.keywords);
+        Some(o) => {
+            let k = crate::export::export_keywords(&p.meta.keywords, cat, o);
             lcc_catalog::keywords::FileKeywords { flat: k.flat, hierarchical: k.hierarchical }
         }
     };

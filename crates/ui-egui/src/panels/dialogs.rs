@@ -4158,10 +4158,15 @@ pub(crate) fn export_settings(app: &mut LccApp, ui: &mut egui::Ui, f: ExportForm
         if all && opts.remove_location {
             summary = format!("{summary}, {}", crate::i18n::tr("Remove location info"));
         }
+        if all && opts.remove_person_info {
+            summary = format!("{summary}, {}", crate::i18n::tr("Remove person info"));
+        }
         if export_section(app, ui, "Metadata", "Metadata", &summary) {
             choices(ui, "Metadata", "exportMetadata", &METADATA, &mut opts.metadata);
             if all {
+                // (keywords are written under these two choices only)
                 crate::dialog_frame::checkbox(ui, &mut opts.remove_location, crate::i18n::tr("Remove location info"));
+                crate::dialog_frame::checkbox(ui, &mut opts.remove_person_info, crate::i18n::tr("Remove person info"));
             }
         }
     }

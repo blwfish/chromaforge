@@ -2739,6 +2739,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "カタログから削除（最近削除した項目へ。ファイルはディスクに残ります）",
   "Remove from the stack": "スタックから外す",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "「取り除く」はファイルをディスクに残し、写真を「最近削除した写真」に移動します。",
+  "Remove person info": "人物情報を除去",
   "Remove region": "領域を削除",
   "Remove the Surface Plugin": "サーフェスプラグインを削除",
   "Remove the strokes of both brushes": "両方のブラシのストロークを削除",

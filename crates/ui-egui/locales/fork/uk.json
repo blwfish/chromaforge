@@ -2626,6 +2626,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Вилучити з каталогу (до «Нещодавно видалених»; файли лишаються на диску)",
   "Remove from the stack": "Прибрати зі стосу",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "«Прибрати» залишає файли на диску й переміщує фото до нещодавно видалених.",
+  "Remove person info": "Видалити інформацію про людей",
   "Remove region": "Прибрати ділянку",
   "Remove the Surface Plugin": "Вилучити плагін Surface",
   "Remove the strokes of both brushes": "Видалити мазки обох пензлів",

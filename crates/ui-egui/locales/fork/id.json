@@ -2798,6 +2798,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Keluarkan dari katalog (ke Baru dihapus; file tetap di disk)",
   "Remove from the stack": "Keluarkan dari tumpukan",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "Mengeluarkan foto tidak menghapus file di disk; foto dipindahkan ke Baru dihapus.",
+  "Remove person info": "Hapus info orang",
   "Remove region": "Hapus wilayah",
   "Remove the Surface Plugin": "Hapus plugin permukaan kontrol",
   "Remove the plugin": "Hapus plugin",

@@ -2736,6 +2736,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Quitar del catálogo (a Eliminadas recientemente; los archivos se quedan en el disco)",
   "Remove from the stack": "Quitar de la pila",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "Quitar conserva los archivos en el disco y mueve las fotos a Eliminadas recientemente.",
+  "Remove person info": "Quitar información de personas",
   "Remove region": "Quitar región",
   "Remove the Surface Plugin": "Quitar el complemento Surface",
   "Remove the strokes of both brushes": "Quitar los trazos de ambos pinceles",

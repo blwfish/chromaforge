@@ -2784,6 +2784,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Poista katalogista (Äskettäin poistetut -kansioon; tiedostot jäävät levylle)",
   "Remove from the stack": "Poista pinosta",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "Poista säilyttää tiedostot levyllä ja siirtää kuvat Äskettäin poistetut -kansioon.",
+  "Remove person info": "Poista henkilötiedot",
   "Remove the Surface Plugin": "Poista ohjauspinnan laajennus",
   "Remove the plugin": "Poista laajennus",
   "Remove the strokes of both brushes": "Poista molempien siveltimien vedot",

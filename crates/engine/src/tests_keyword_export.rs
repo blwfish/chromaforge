@@ -1,6 +1,7 @@
 //! What an export lets out of the library, for every kind of file it writes: an Original's
 //! sidecar and a raw DNG follow the Metadata choice and the keywords' "include on export" option
-//! as a rendered file does (FX-137), and a web gallery's `{keywords}` token too (FX-141).
+//! as a rendered file does (FX-137), a web gallery's `{keywords}` token too (FX-141), and Remove
+//! Person Info leaves out person keywords (FX-142).
 
 use lcc_catalog::keywords::KeywordInfo;
 use lcc_catalog::{Op, PhotoId};
@@ -71,6 +72,10 @@ fn an_originals_sidecar_follows_the_metadata_choice_and_keyword_flags() {
     for kept in ["publickw", "Alice", "KwSecretTitle", "KwPrivateCaption", "KwCopyright", "lc:settings"] {
         assert!(contains(&x, kept), "All keeps {kept}");
     }
+    // Remove Person Info (FX-142): the person keyword, and its containing keyword, stay out
+    let x = sidecar(&mut s, &ExportOptions { format: ExportFormat::Original, remove_person_info: true, ..Default::default() });
+    assert!(!contains(&x, "Alice") && !contains(&x, "People"), "person keywords removed");
+    assert!(contains(&x, "publickw"));
 }
 
 /// FX-137: a raw exported as DNG embeds the same packet (the review's PoC
@@ -108,4 +113,42 @@ fn the_web_gallery_keywords_token_follows_the_keyword_flags() {
     let text = v["files"].to_string();
     assert!(text.contains("publickw"), "sanity: the token is rendered");
     assert!(!text.contains("secretkw"), "the page publishes a keyword marked not-for-export");
+}
+
+/// FX-142: Remove Person Info in rendered files, in params and presets, and from a Lightroom
+/// preset's `removeFaceMetadata`.
+#[test]
+fn remove_person_info_leaves_out_person_keywords() {
+    let mut s = Session::with_demo();
+    let id = s.visible_cloned()[0];
+    private_metadata(&mut s, id);
+    let keywords = |s: &mut Session, o: &ExportOptions| lcc_meta::extract(&export_photo(s, id, o, 1).unwrap().bytes).keywords;
+    let all = keywords(&mut s, &ExportOptions::default());
+    assert!(all.iter().any(|k| k == "Alice") && all.iter().any(|k| k == "People"), "{all:?}");
+    let o = ExportOptions::from_params(&json!({"removePersonInfo": true})).unwrap();
+    assert!(o.remove_person_info);
+    assert_eq!(o.to_json()["removePersonInfo"], json!(true), "saved with a preset");
+    assert!(ExportOptions::default().to_json().get("removePersonInfo").is_none(), "only written when on");
+    let without = keywords(&mut s, &o);
+    assert!(!without.iter().any(|k| k == "Alice" || k == "People"), "{without:?}");
+    assert!(without.iter().any(|k| k == "publickw"));
+    assert!(ExportOptions::from_params(&json!({"removePersonInfo": "yes"})).is_err(), "a boolean");
+    // a person keyword that another keyword contains brings no containing keyword of its own;
+    // a containing keyword the photo carries itself still goes
+    let mut meta = s.catalog.photo(id).unwrap().meta.clone();
+    meta.keywords.push("People".into());
+    s.catalog.apply(Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+    let k = keywords(&mut s, &o);
+    assert!(k.iter().any(|k| k == "People") && !k.iter().any(|k| k == "Alice"), "{k:?}");
+    // Lightroom's preset option
+    let (on, _) = crate::cmd::export_preset_files::lr_export_params(&lua(true));
+    assert_eq!(on.get("removePersonInfo"), Some(&json!(true)));
+    let (off, unmapped) = crate::cmd::export_preset_files::lr_export_params(&lua(false));
+    assert!(off.get("removePersonInfo").is_none());
+    assert!(unmapped.iter().any(|u| u.contains("face regions")), "{unmapped:?}");
+}
+
+fn lua(remove: bool) -> crate::preset_import::Lua {
+    let text = format!("s = {{ value = {{ format = \"JPEG\", removeFaceMetadata = {remove} }} }}");
+    crate::preset_import::parse_lua(&text).unwrap().get("value").unwrap().clone()
 }

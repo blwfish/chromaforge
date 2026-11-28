@@ -453,6 +453,13 @@ impl Catalog {
     /// containing keywords" is off) and synonyms (unless "export synonyms" is off). Each name once,
     /// whatever its case.
     pub fn export_keywords(&self, keywords: &[String]) -> ExportKeywords {
+        self.export_keywords_with(keywords, false)
+    }
+
+    /// [`Self::export_keywords`]; with `without_people`, a keyword marked as a person
+    /// ([`KeywordInfo::person`]) goes nowhere either, nor the containing keywords and synonyms it
+    /// would have brought (Lightroom Classic's Remove Person Info).
+    pub fn export_keywords_with(&self, keywords: &[String], without_people: bool) -> ExportKeywords {
         let defaults = KeywordInfo::default();
         let info = |path: &str| self.keyword_info(path).unwrap_or(&defaults);
         let mut out = ExportKeywords::default();
@@ -467,7 +474,8 @@ impl Catalog {
         for k in keywords {
             let path = clean(k);
             let me = info(&path);
-            if path.is_empty() || !me.include_on_export {
+            let left_out = |i: &KeywordInfo| !i.include_on_export || (without_people && i.person);
+            if path.is_empty() || left_out(me) {
                 continue;
             }
             let levels: Vec<&str> = path.split(SEP).collect();
@@ -486,7 +494,7 @@ impl Catalog {
                 for at in (0..levels.len().saturating_sub(1)).rev() {
                     let parent = levels.get(..=at).map(|l| l.join("|")).unwrap_or_default();
                     let pi = info(&parent);
-                    if pi.include_on_export {
+                    if !left_out(pi) {
                         names(at, pi);
                     }
                 }

@@ -2514,6 +2514,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "Retirer du catalogue (vers Supprimés récemment ; les fichiers restent sur le disque)",
   "Remove from the stack": "Retirer de la pile",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "Retirer conserve les fichiers sur le disque et place les photos dans Supprimées récemment.",
+  "Remove person info": "Supprimer les informations sur les personnes",
   "Remove the Surface Plugin": "Supprimer le module Surface",
   "Remove the strokes of both brushes": "Supprimer les traits des deux pinceaux",
   "Remove this device? It also stops syncing this catalog with it.": "Supprimer cet appareil ? La synchronisation de ce catalogue avec lui s’arrête aussi.",

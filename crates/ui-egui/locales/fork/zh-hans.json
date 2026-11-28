@@ -2694,6 +2694,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "从目录中移除（移至“最近删除”；文件保留在磁盘上）",
   "Remove from the stack": "从堆栈中移除",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "“移除”会保留磁盘上的文件，并将照片移到“最近删除”。",
+  "Remove person info": "移除人物信息",
   "Remove region": "移除区域",
   "Remove the Surface Plugin": "移除 Surface 插件",
   "Remove the strokes of both brushes": "移除两种画笔的笔触",

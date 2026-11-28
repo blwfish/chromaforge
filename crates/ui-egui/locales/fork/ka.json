@@ -2933,6 +2933,7 @@
   "Remove from the catalog (to Recently Deleted; the files stay on disk)": "კატალოგიდან ამოშლა („ახლახან წაშლილში“; ფაილები დისკზე რჩება)",
   "Remove from the stack": "დასტიდან ამოშლა",
   "Remove keeps the files on disk and moves the photos to Recently Deleted.": "ამოშლისას ფაილები დისკზე რჩება, ფოტოები კი „ახლახან წაშლილში“ გადადის.",
+  "Remove person info": "პირების ინფორმაციის წაშლა",
   "Remove region": "არის წაშლა",
   "Remove the Surface Plugin": "მართვის პანელის დანამატის წაშლა",
   "Remove the plugin": "დანამატის წაშლა",
