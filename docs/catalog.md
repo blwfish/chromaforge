@@ -107,6 +107,12 @@ fast (below), not about leaving photos on disk.
   and reads them off in order, so no query sorts. Ops that change a sort key bump an epoch that retires the stale
   orders; capture-date, import-date and random orders survive everything but added or removed photos and capture-time
   changes, so rating, flagging and editing never re-sort them;
+- **no NaN or infinity is saved** (`finite.rs`): JSON has neither, and `serde_json` writes them as `null`, which a
+  number field can't read back (the photo record would be skipped at the next open, a JSON snapshot wouldn't open).
+  `Catalog::apply` refuses an op holding one before it changes anything; the checkpoint (each photo, each distinct
+  develop settings value as `settings_ref` first writes it, the head record) and the JSON snapshot refuse to write one
+  that got in another way, and nothing is written. A non-finite number directly in an optional field (an aperture of
+  0/0) is let through: it is written as `null` and reads back as "not known", as before;
 - redb panics on some damaged files: every call into it is wrapped (`guarded`), so a damaged store is an error
   ("restore it from a backup"), never a crash (`tests_v4::damaged_or_missing_store_is_an_error_not_a_crash` flips and
   truncates bytes).

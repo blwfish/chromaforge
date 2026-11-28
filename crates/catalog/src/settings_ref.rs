@@ -77,6 +77,11 @@ fn reference(v: &Arc<DevelopSettings>) -> Option<Result<u128, String>> {
             enc.by_ptr.insert(ptr, h);
             return Some(Ok(h));
         }
+        // (each distinct settings once: a NaN or infinity would be written as `null`, which the next load can't
+        // read, dropping every photo that refers to it)
+        if let Some(field) = crate::finite::non_finite_field(v.as_ref()) {
+            return Some(Err(format!("develop settings hold a value that can't be saved (`{field}` is not a finite number)")));
+        }
         let json = match serde_json::to_vec(v.as_ref()) {
             Ok(j) => j,
             Err(err) => return Some(Err(err.to_string())),

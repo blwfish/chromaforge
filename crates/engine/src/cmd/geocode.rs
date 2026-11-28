@@ -376,7 +376,12 @@ mod tests {
             let dir = dataset("fill");
             set_gps(&mut s, ids[0], Some((48.86, 2.34)), "");
             set_gps(&mut s, ids[1], Some((51.5, -0.1)), "Westminster");
-            set_gps(&mut s, ids[2], Some((f64::NAN, 0.0)), "");
+            // a position that isn't a number can't be stored at all (the catalog refuses the edit), so this photo
+            // has none and isn't looked up
+            let mut meta = s.catalog.photo(ids[2]).unwrap().meta.clone();
+            meta.gps = Some((f64::NAN, 0.0));
+            assert!(s.commit("test", Op::SetMeta { id: ids[2], meta: Box::new(meta) }).is_err());
+            set_gps(&mut s, ids[2], None, "");
             set_gps(&mut s, ids[3], Some((0.0, 0.0)), "");
             let r = s.execute("metadata.reverseGeocode", &json!({"ids": [ids[0].0, ids[1].0, ids[2].0, ids[3].0], "dataset": dir})).unwrap();
             assert_eq!((r["looked"].as_u64(), r["found"].as_u64(), r["changed"].as_u64()), (Some(3), Some(2), Some(2)), "{r}");

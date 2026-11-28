@@ -606,13 +606,27 @@ impl CatalogDb {
         let chunks: Vec<&[&Arc<Photo>]> = photos.chunks(chunk).collect();
         let parts = par_map(&chunks, 2, |c| {
             settings_ref::encode_scope(is_known.clone(), || {
-                c.iter().map(|p| serde_json::to_vec(p.as_ref()).map(|j| (p.id.0, j))).collect::<std::result::Result<Vec<_>, _>>()
+                c.iter()
+                    .map(|p| {
+                        // a NaN or infinity is written as `null`, which the next load can't read: the photo
+                        // would be skipped (and with it its edits), so the checkpoint is refused instead. (In
+                        // this scope develop settings are references: each distinct one is checked once, as it
+                        // is first written, by `settings_ref`.)
+                        if let Some(field) = crate::finite::non_finite_field(p.as_ref()) {
+                            return Err(CatalogError::Invalid(format!(
+                                "photo {} holds a value that can't be saved (`{field}` is not a finite number); nothing was written",
+                                p.id.0
+                            )));
+                        }
+                        serde_json::to_vec(p.as_ref()).map(|j| (p.id.0, j)).map_err(|e| CatalogError::Io(format!("encode photo: {e}")))
+                    })
+                    .collect::<Result<Vec<_>>>()
             })
         })?;
         let mut records = Vec::with_capacity(photos.len());
         let mut settings = HashMap::new();
         for (recs, new) in parts {
-            records.extend(recs.map_err(|e| CatalogError::Io(format!("encode photo: {e}")))?);
+            records.extend(recs?);
             settings.extend(new);
         }
         Ok((records, settings))
@@ -673,6 +687,12 @@ impl CatalogDb {
             meta.insert("generation", generation.to_string().as_bytes()).map_err(dberr)?;
             let head = Head::of(cat);
             if full || head != self.base.head {
+                // (a head record the load can't read refuses the whole library)
+                if let Some(field) = crate::finite::non_finite_field(&head) {
+                    return Err(CatalogError::Invalid(format!(
+                        "the catalog holds a value that can't be saved (`{field}` is not a finite number); nothing was written"
+                    )));
+                }
                 let j = serde_json::to_vec(&head).map_err(|e| CatalogError::Io(e.to_string()))?;
                 meta.insert("head", j.as_slice()).map_err(dberr)?;
             }

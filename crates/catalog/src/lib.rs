@@ -18,6 +18,7 @@ pub mod dates;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod db;
 pub mod facets;
+mod finite;
 pub mod folders;
 pub mod incoming;
 mod index;
@@ -844,6 +845,11 @@ impl Catalog {
     /// remembered of the op in what the latest ops touched. The one exception is a batch whose rollback fails: the
     /// catalog did change, so the revision advances and anything may be taken to have changed.
     pub fn apply(&mut self, op: Op) -> Result<Op> {
+        // JSON can't hold NaN or infinity: refused before anything changes, so no writer meets it (the log refuses
+        // such a record, and a snapshot or checkpoint would write `null`, which drops the photo at the next open)
+        if let Some(field) = finite::non_finite_field(&op) {
+            return Err(CatalogError::Invalid(format!("an edit holds a value that can't be saved (`{field}` is not a finite number)")));
+        }
         // the revision was set from outside: what is remembered is of another past
         self.forget_other_past();
         let broad = self.changes.broad;
@@ -1940,6 +1946,8 @@ mod tests_local;
 mod tests_lock;
 #[cfg(test)]
 mod tests_log_thread;
+#[cfg(test)]
+mod tests_non_finite;
 #[cfg(test)]
 mod tests_quality;
 #[cfg(test)]

@@ -2044,14 +2044,22 @@ fn presets_validate_groups_on_create_and_update() {
 
 /// A Heal or Remove spot whose size (from a sidecar, which isn't held to the slider's range) is far past the photo
 /// made the render's radius infinite: its heal blur and the source it reads went with it, overflowing the blur's box
-/// radii and the bilinear sampler (issue #1519). Such spots render, quickly, as a spot over the whole frame.
+/// radii and the bilinear sampler (issue #1519). Such spots render, quickly, as a spot over the whole frame. A size
+/// that isn't a finite number can't be stored at all (the catalog refuses the edit; the renderer's own handling of
+/// one is tested in `lcc_pipeline::spots`).
 #[test]
 fn oversized_spots_render() {
     use lcc_develop::{Spot, SpotMode};
     let mut s = demo();
     let id = s.active().unwrap();
     let base = (*s.develop_of(id).unwrap_or_default()).clone();
-    for size in [10.0, 1e30, f64::MAX, f64::INFINITY, f64::NAN] {
+    for size in [f64::INFINITY, f64::NAN] {
+        let mut dd = base.clone();
+        dd.spots.push(Spot { mode: SpotMode::Heal, points: vec![lcc_geom::Point::new(0.5, 0.5)], size, ..Default::default() });
+        assert!(s.set_develop(id, dd, "Remove").is_err(), "{size}");
+        assert_eq!(*s.develop_of(id).unwrap_or_default(), base, "{size}: the photo is as it was");
+    }
+    for size in [10.0, 1e30, f64::MAX] {
         for mode in [SpotMode::Heal, SpotMode::Remove, SpotMode::Clone] {
             let mut dd = base.clone();
             dd.spots.push(Spot { mode, points: vec![lcc_geom::Point::new(0.5, 0.5)], size, ..Default::default() });

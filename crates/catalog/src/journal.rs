@@ -450,6 +450,15 @@ fn resync(line: &[u8], last: u64) -> Option<(usize, (u64, Op))> {
 /// as before streaming. Fills in the serialise / write+sync times and the size.
 fn write_snapshot(store: &mut dyn Store, seq: u64, catalog: &Catalog) -> std::io::Result<SnapshotTiming> {
     let t0 = web_time::Instant::now();
+    // a NaN or infinity would be written as `null`, and the snapshot (which replaces the old one and empties the
+    // log) would then not open at all: refused, nothing written ([`crate::Catalog::apply`] refuses such values, so
+    // this is only met by one that got in another way)
+    if let Some(field) = crate::finite::non_finite_field(catalog) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("the catalog holds a value that can't be saved (`{field}` is not a finite number); the snapshot was not written"),
+        ));
+    }
     let mut serialize_ms = 0.0;
     let bytes = store.write_atomic_with(SNAPSHOT, &mut |w| {
         use std::io::Write;
