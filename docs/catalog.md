@@ -119,7 +119,10 @@ snapshot is rewritten in this build's format, and the store's `meta.version` is 
 records stay as the older build wrote them, since newer builds read every older format). From then on the older build
 refuses the library instead of opening it and dropping fields it doesn't know. If the store can't be marked (a full
 disk, a store file that can't be written), the open is refused and the library left unchanged, as it is when the log
-holds a record of a newer build; `LoadReport::upgraded_from` names the format it was upgraded from.
+holds a record of a newer build; `LoadReport::upgraded_from` names the format it was upgraded from. The open keeps
+what it loaded as the baseline the first checkpoint compares against (the store isn't reopened after the copy), so
+photos, albums and stacks deleted after an upgrading open, or by the log it replays, are removed from the store like
+any other deletion.
 
 ### Tables
 

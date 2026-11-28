@@ -845,7 +845,13 @@ pub(crate) fn older_store(tag: &str, version: Option<&str>) -> Scratch {
         fill(&mut j, &mut c, 3);
         j.snapshot(&c).unwrap();
     }
-    let db = redb::Database::open(s.path().join(DB_FILE)).unwrap();
+    mark_older(s.path(), version);
+    s
+}
+
+/// Mark the store in `dir` as an older build left it: `version` set to `version`, or removed when `None`.
+pub(crate) fn mark_older(dir: &Path, version: Option<&str>) {
+    let db = redb::Database::open(dir.join(DB_FILE)).unwrap();
     let w = db.begin_write().unwrap();
     {
         let mut meta = w.open_table(redb::TableDefinition::<&str, &[u8]>::new("meta")).unwrap();
@@ -855,7 +861,6 @@ pub(crate) fn older_store(tag: &str, version: Option<&str>) -> Scratch {
         };
     }
     w.commit().unwrap();
-    s
 }
 
 /// A format-12 field (`SetContent.preview_checked`), the kind a format-11 build drops.
@@ -895,6 +900,65 @@ fn an_older_store_is_marked_with_this_format_before_the_log_grows() {
     assert_eq!(r2.upgraded_from, None, "upgraded once");
     assert_eq!(c2.len(), c.len());
     assert_eq!(c2.photos().map(|p| p.preview_checked.clone()).filter(|v| v == "0.9.0").count(), 1);
+}
+
+/// The open that upgrades a store keeps what it loaded as the baseline the first checkpoint compares against, so a
+/// photo, album or stack deleted after it is removed from the store. (It used to reopen the store without loading it:
+/// the first checkpoint saw nothing to remove, the deletions came back on the next open, and the integrity test failed
+/// at every exit, so no scheduled backup was made.)
+#[test]
+fn a_deletion_after_an_upgrade_on_open_is_saved() {
+    let s = Scratch::new("upgrade-delete");
+    {
+        let (mut j, mut c, _) = open(s.path());
+        fill(&mut j, &mut c, 6);
+        j.snapshot(&c).unwrap();
+    }
+    mark_older(s.path(), Some("11"));
+    let (mut j, mut c, r) = open(s.path());
+    assert_eq!(r.upgraded_from, Some(11), "the open upgraded the store");
+    let photo = c.photos().last().unwrap().id;
+    let album = c.albums().next().unwrap().id;
+    let stack = c.stacks().next().unwrap().id;
+    let ops = vec![c.delete_photos_permanently_ops(&[photo]), Op::RemoveAlbum { id: album }, Op::RemoveStack { id: stack }];
+    for op in &ops {
+        c.apply(op.clone()).unwrap();
+    }
+    j.append(&ops).unwrap();
+    let report = j.check_integrity(&c).unwrap(); // checkpoints into the store, then resets the log
+    assert!(report.ok(), "{report:?}");
+    let n = c.len();
+    drop(j);
+    let (_j, back, _) = open(s.path());
+    assert_eq!(back.len(), n, "the deleted photo stays deleted");
+    assert!(!back.photos().any(|p| p.id == photo));
+    assert_eq!(back.albums().count(), 0, "the deleted album stays deleted");
+    assert_eq!(back.stacks().count(), 0, "the deleted stack stays deleted");
+}
+
+/// The same for a deletion the upgrade-open replays from the log an older build left.
+#[test]
+fn a_deletion_replayed_by_an_upgrade_on_open_is_saved() {
+    let s = Scratch::new("upgrade-replay-delete");
+    let photo = {
+        let (mut j, mut c, _) = open(s.path());
+        fill(&mut j, &mut c, 3);
+        j.snapshot(&c).unwrap();
+        let photo = c.photos().last().unwrap().id;
+        let del = c.delete_photos_permanently_ops(&[photo]);
+        c.apply(del.clone()).unwrap();
+        j.append(&[del]).unwrap(); // in the log only: quit before the next checkpoint
+        photo
+    };
+    mark_older(s.path(), Some("11"));
+    let (mut j, c, r) = open(s.path());
+    assert_eq!(r.upgraded_from, Some(11));
+    assert!(!c.photos().any(|p| p.id == photo), "the replay deleted it");
+    j.snapshot(&c).unwrap();
+    drop(j);
+    let (_j, back, _) = open(s.path());
+    assert!(!back.photos().any(|p| p.id == photo), "the replayed deletion came back after the checkpoint");
+    assert_eq!(back.len(), 2);
 }
 
 /// A store with no `version` in its `meta` table counts as format 0 and is upgraded the same way.

@@ -306,12 +306,14 @@ impl Journal {
         if stored < crate::journal::VERSION {
             crate::journal::refuse_newer_records(log.as_deref().unwrap_or_default())?;
             // copy first: the store, its log and stub as the older build left them, checked, before
-            // anything of the library is written (the store is closed meanwhile, so the copy is
-            // the file as it is on disk)
-            drop(db);
+            // anything of the library is written (`CatalogDb` holds the file open only for each
+            // operation, so the copy is the file as it is on disk). The loaded `db` is kept, not
+            // reopened: its baseline is what the first checkpoint compares against (a reopened one
+            // has none, so nothing deleted from now on would be removed from the store), and it
+            // knows which records the load skipped. A store changed meanwhile is still caught: its
+            // generation no longer matches, and the next checkpoint treats it as changed.
             let kept = crate::upgrade_backup::keep_copy(dir, stored, crate::journal::VERSION, &[DB_FILE, LOG, SNAPSHOT])?;
             report.upgrade_backup = Some(kept);
-            db = CatalogDb::open(&db_path)?;
             db.mark_version().map_err(|e| match e {
                 CatalogError::Io(e) => CatalogError::Io(format!(
                     "can't upgrade {} from catalog format v{stored} to v{} ({e}). The catalog was left unchanged: free some disk space (or make it writable), then try again",

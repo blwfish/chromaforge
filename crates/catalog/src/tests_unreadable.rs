@@ -117,6 +117,20 @@ fn optimise_keeps_a_record_the_load_could_not_read() {
 
 /// A checkpoint that finds the store changed by another writer since it was loaded rewrites it whole from memory. With
 /// a record the load skipped, that would delete it: the checkpoint is refused instead (the changes stay in the log).
+/// The open that upgrades a store an older build wrote keeps the count of what its load skipped, so Optimise is
+/// refused there too.
+#[test]
+fn optimise_after_an_upgrade_on_open_keeps_a_record_the_load_could_not_read() {
+    let s = library("unreadable-upgrade", 6);
+    let key = damage(s.path(), PHOTOS);
+    crate::tests_v4::mark_older(s.path(), Some("11"));
+    let (mut j, c, r) = open(s.path());
+    assert_eq!((r.upgraded_from, r.unreadable), (Some(11), 1));
+    j.optimize(&c).expect_err("refused while the store holds a record the load skipped");
+    drop(j);
+    assert_eq!(stored(s.path(), PHOTOS, key).as_deref(), Some(DAMAGED), "the record is still in the store");
+}
+
 #[test]
 fn a_store_changed_by_another_writer_keeps_a_record_the_load_could_not_read() {
     let s = library("unreadable-generation", 6);
