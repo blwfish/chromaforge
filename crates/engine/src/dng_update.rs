@@ -8,8 +8,9 @@
 //! [`UpdateJob::run`] (no session: reads, renders, rewrites), [`finish`] (on the session: drops
 //! what the session cached of the files). `photo.updateDngPreview` runs all three in a row.
 //!
-//! The file is replaced atomically (a temp file next to it, synced, renamed over it), and only
-//! when it is still what was read: a file that changed meanwhile is left alone. DNGs this will not
+//! The file is replaced atomically (a temp file next to it, synced, read back, renamed over it), and
+//! only when it is still what was read, byte for byte, right before the rename: a file that changed
+//! meanwhile is left alone, and one moved or deleted meanwhile is not recreated. DNGs this will not
 //! touch (Adobe-written ones, unknown structures) are reported with the reason, never patched.
 //! Not a DNG: reported as skipped.
 
@@ -193,6 +194,12 @@ fn merged_xmp(existing: Option<Vec<u8>>, fresh: &str) -> std::result::Result<Str
     }
 }
 
+// Tests: something done to the file on this thread while its preview renders (another program's edit).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static WHILE_RENDERING: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// One photo: read, check, render, build, replace.
 fn update_one(item: Item) -> std::result::Result<Done, String> {
     let path = Path::new(&item.path);
@@ -204,14 +211,24 @@ fn update_one(item: Item) -> std::result::Result<Done, String> {
     let xmp = merged_xmp(existing, &item.xmp)?;
     let export = item.export.ok_or("no preview was prepared")?;
     let preview = export.run()?;
+    #[cfg(test)]
+    WHILE_RENDERING.with(|h| h.borrow().as_ref().map(|h| h(path)));
     let made = lcc_raw::dngupdate::update(&file, &preview.bytes, xmp.as_bytes()).map_err(|e| e.to_string())?;
-    // only over the file that was read: one that changed meanwhile (a camera tool, a sync) is left alone
-    let now = std::fs::metadata(path).map_err(|e| format!("{}: {e}", item.path))?;
-    if now.len() != before.len() || now.modified().ok() != before.modified().ok() {
-        return Err("the file changed while its preview was being made; try again".into());
-    }
-    // the original is replaced only by a file that reads back as written (a raw may have no other copy)
-    lcc_catalog::safe_file::replace_verified(path, &made.bytes).map_err(|e| format!("{}: {e}", item.path))?;
+    // The original is replaced only by a file that reads back as written (a raw may have no other copy), and only
+    // while it is still the file that was read, checked right before the rename: its length and time first, then
+    // every byte. A same-size edit within a volume's timestamp granularity, or by a tool that keeps the time
+    // (`exiftool -P`), is left alone too, and a file moved or deleted meanwhile is never recreated.
+    let mut unchanged = |p: &Path| -> std::io::Result<bool> {
+        let now = std::fs::metadata(p)?;
+        if now.len() != before.len() || now.modified().ok() != before.modified().ok() {
+            return Ok(false);
+        }
+        lcc_catalog::safe_file::same_content_as(p, &file)
+    };
+    lcc_catalog::safe_file::replace_verified_if(path, &made.bytes, &mut unchanged).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => "the file was moved or deleted while its preview was being made; nothing was written".to_string(),
+        _ => format!("{}: {e}", item.path),
+    })?;
     Ok(Done { bytes: made.bytes.len() as u64, preview: made.preview_size, replaced: made.replaced_previews })
 }
 

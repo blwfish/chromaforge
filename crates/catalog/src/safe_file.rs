@@ -306,11 +306,24 @@ fn replace_with(path: &Path, sync: bool, fill: &mut dyn FnMut(&mut dyn Write) ->
 /// a flaky network volume) the temp file is removed and `path` is left as it was. The same check
 /// as [`write_new`]'s (issue #134 point 4), for a file that replaces rather than adds one.
 pub fn replace_verified(path: &Path, data: &[u8]) -> io::Result<()> {
+    replace_verified_if(path, data, &mut |_| Ok(true))
+}
+
+/// [`replace_verified`], and only while `path` is still what the caller read: `unchanged` is asked about the file
+/// (the one a symbolic link leads to) right before the rename, after the new file was written and read back, and
+/// the replacement goes ahead only on `Ok(true)`. On `Ok(false)` or an error (a file moved or deleted meanwhile
+/// gives `NotFound`: it is never recreated) the temp file is removed and the file is left as it is. What remains is
+/// the moment between that check and the rename.
+pub fn replace_verified_if(path: &Path, data: &[u8], unchanged: &mut dyn FnMut(&Path) -> io::Result<bool>) -> io::Result<()> {
     let real = replace_target(path)?;
     let path = real.as_path();
     let (tmp, _) = write_temp(path, Some(&NoProgress), &mut |w| w.write_all(data))?;
     let checked = match same_content(&tmp, data, &NoProgress) {
-        Ok(true) => fs::rename(&tmp, path),
+        Ok(true) => match unchanged(path) {
+            Ok(true) => fs::rename(&tmp, path),
+            Ok(false) => Err(io::Error::other("it changed while the new file was being made, so it was left as it is now; try again")),
+            Err(e) => Err(e),
+        },
         Ok(false) => Err(io::Error::other(
             "the new file read back different from what was written (a failing drive or connection?), so it did not replace the \
              original, which was left as it was",
@@ -452,6 +465,11 @@ fn publish_new_by_rename(tmp: &Path, path: &Path, before_claim: &dyn Fn()) -> io
 }
 
 /// Does the file at `path` hold exactly `data`?
+/// Whether the file at `path` holds exactly `data` (read in 1 MiB pieces, stopping at the first difference).
+pub fn same_content_as(path: &Path, data: &[u8]) -> io::Result<bool> {
+    same_content(path, data, &NoProgress)
+}
+
 fn same_content(path: &Path, data: &[u8], progress: &dyn WriteProgress) -> io::Result<bool> {
     use std::io::Read;
     let mut f = File::open(path)?;
@@ -1072,6 +1090,34 @@ mod read_back_tests {
         replace_verified(&p, b"the new file").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"the new file");
         assert_eq!(names(d.path()), ["IMG_1.dng"], "no temp file left");
+    }
+
+    /// The caller's "still what I read" check runs after the new file is written and read back, right before the
+    /// rename, and decides: a changed file is left as it is now, a vanished one is not recreated, and neither keeps
+    /// a temp file.
+    #[test]
+    fn an_original_is_replaced_only_while_the_caller_says_it_is_unchanged() {
+        let d = scratch("unchanged");
+        let p = d.path().join("IMG_1.dng");
+        fs::write(&p, b"the original").unwrap();
+        let mut asked = Vec::new();
+        let e = replace_verified_if(&p, b"the new file", &mut |at| {
+            asked.push(at.to_path_buf());
+            fs::write(at, b"another program's").map(|()| false)
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("changed"), "{e}");
+        assert_eq!(asked, vec![p.clone()], "asked once, about the file itself");
+        assert_eq!(fs::read(&p).unwrap(), b"another program's");
+        assert_eq!(names(d.path()), ["IMG_1.dng"], "no temp file left");
+
+        let e = replace_verified_if(&p, b"the new file", &mut |at| fs::remove_file(at).and_then(|()| fs::metadata(at)).map(|_| true)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+        assert!(names(d.path()).is_empty(), "not recreated, no temp file left");
+
+        fs::write(&p, b"the original").unwrap();
+        replace_verified_if(&p, b"the new file", &mut |at| same_content_as(at, b"the original")).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"the new file");
     }
 
     #[test]

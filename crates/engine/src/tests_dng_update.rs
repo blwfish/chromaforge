@@ -171,3 +171,53 @@ fn one_file_is_updated_once_however_many_photos_name_it() {
     assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("same file"), "{r}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Run the update of the one photo in `s` while `meanwhile` happens to its file (another program, during the render).
+fn update_while(s: &mut Session, meanwhile: impl Fn(&std::path::Path) + 'static) -> crate::Result<Value> {
+    crate::dng_update::WHILE_RENDERING.with(|h| *h.borrow_mut() = Some(Box::new(meanwhile)));
+    let r = s.execute("photo.updateDngPreview", &json!({}));
+    crate::dng_update::WHILE_RENDERING.with(|h| *h.borrow_mut() = None);
+    r
+}
+
+/// Another program changes the DNG while its preview renders, keeping its size and modification time (as
+/// `exiftool -P` does, or within a volume's timestamp granularity): the update leaves that program's change alone.
+/// (Length and modification time alone used to be the check; removing it failed no test.)
+#[test]
+fn a_dng_changed_while_it_renders_is_left_alone_even_at_the_same_size_and_time() {
+    let original = synthetic_dng_with(None, lcc_meta::Metadata::default());
+    let (mut s, dir, file) = with_dng("dng-update-changed", &original);
+    let theirs = {
+        let mut b = original.clone();
+        let last = b.len() - 1;
+        b[last] ^= 0xff;
+        b
+    };
+    let edit = theirs.clone();
+    let e = update_while(&mut s, move |p| {
+        let mtime = std::fs::metadata(p).unwrap().modified().unwrap();
+        std::fs::write(p, &edit).unwrap();
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(mtime).unwrap();
+    })
+    .unwrap_err();
+    assert!(e.to_string().contains("changed"), "{e}");
+    assert_eq!(std::fs::read(&file).unwrap(), theirs, "the other program's change is kept");
+    // a plain change (another length) too
+    let longer = [original.as_slice(), b"more"].concat();
+    let edit = longer.clone();
+    assert!(update_while(&mut s, move |p| std::fs::write(p, &edit).unwrap()).is_err());
+    assert_eq!(std::fs::read(&file).unwrap(), longer);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A DNG moved or deleted while its preview renders is not brought back at its old path.
+#[test]
+fn a_dng_removed_while_it_renders_is_not_recreated() {
+    let (mut s, dir, file) = with_dng("dng-update-removed", &synthetic_dng_with(None, lcc_meta::Metadata::default()));
+    let moved = dir.join("moved.dng");
+    let to = moved.clone();
+    let e = update_while(&mut s, move |p| std::fs::rename(p, &to).unwrap()).unwrap_err();
+    assert!(!file.exists(), "the file was recreated at its old path: {e}");
+    assert!(moved.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
