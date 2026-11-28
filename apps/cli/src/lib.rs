@@ -1232,6 +1232,7 @@ fn snapshot(args: &[String]) -> Result<(), String> {
     let services = lcc_ui_egui::Services {
         write_shared: Some(std::sync::Arc::new(lcc_engine::export::write_file)),
         write: Some(Box::new(lcc_engine::export::write_file)),
+        write_new: Some(lcc_engine::export::write_file_new),
         png: Some(Box::new(|img: &lcc_raster::Rgba8| {
             lcc_codecs::encode_png(&lcc_codecs::EncodeImage::rgba8(img), &lcc_codecs::EncodeMeta::default()).unwrap_or_default()
         })),

@@ -87,7 +87,7 @@ fn mean_luma(path: &Path, t: f64) -> f32 {
 fn export(s: &mut Session, ids: &[PhotoId], o: &ExportOptions, dir: &Path, hooks: &VideoHooks) -> Result<Vec<serde_json::Value>, String> {
     let mut items = prepare_batch(s, ids, o)?;
     set_video_hooks(&mut items, hooks);
-    let to = Destination { dir: dir.to_string_lossy().to_string(), exact: None };
+    let to = Destination { dir: dir.to_string_lossy().to_string(), exact: None, ..Default::default() };
     run_batch(items, o, &to, &mut crate::export::write_file, &|p| Path::new(p).exists(), false, &mut |_, _| true)
 }
 

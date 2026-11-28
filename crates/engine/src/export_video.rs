@@ -113,6 +113,36 @@ impl TempFile {
         r
     }
 
+    /// [`Self::move_to`] for a movie that must be a new file (Unique and Skip): never replaces a
+    /// file at `dest`, also not one that appeared after the caller looked. `Ok(false)` when the
+    /// name is taken (the movie stays here).
+    pub fn move_new_to(&self, dest: &str) -> Result<bool, String> {
+        let d = Path::new(dest);
+        if let Some(dir) = d.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        let taken = |e: &std::io::Error| e.kind() == std::io::ErrorKind::AlreadyExists;
+        // same volume: a hard link or a placeholder renamed over (the temp name then goes)
+        match lcc_catalog::safe_file::publish_new(&self.0, d) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(&self.0);
+                return Ok(true);
+            }
+            Err(e) if taken(&e) => return Ok(false),
+            Err(_) => {}
+        }
+        // another volume: copy beside the destination first, then give the copy the name
+        let part = PathBuf::from(format!("{dest}.partial"));
+        let r = std::fs::copy(&self.0, &part).map_err(|e| format!("{dest}: {e}")).and_then(|_| match lcc_catalog::safe_file::publish_new(&part, d) {
+            Ok(()) => Ok(true),
+            Err(e) if taken(&e) => Ok(false),
+            Err(e) => Err(format!("{dest}: {e}")),
+        });
+        // after a link `part` is a second name of the movie; after a rename it is gone
+        let _ = std::fs::remove_file(&part);
+        r
+    }
+
     pub fn len(&self) -> u64 {
         std::fs::metadata(&self.0).map_or(0, |m| m.len())
     }

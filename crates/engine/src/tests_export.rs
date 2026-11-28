@@ -171,7 +171,7 @@ fn presets_conflicts_and_subfolders() {
 
         // a fake file system: what exists, what was written
         let existing = ["out/Sub/LC01347.png".to_string()];
-        let to = Destination { dir: "out".into(), exact: None };
+        let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
         let batch = |s: &mut Session, ids: &[_], o: &ExportOptions| {
             let mut written: Vec<String> = Vec::new();
             let mut write = |p: &str, _: &[u8]| {
@@ -442,7 +442,7 @@ fn explicit_export_paths_follow_the_conflict_policy() {
         let target = dir.join("chosen.name.jpg");
         std::fs::write(&target, b"precious existing file").unwrap();
         std::fs::write(dir.join("chosen.name-2.jpg"), b"previous numbered export").unwrap();
-        let to = Destination { dir: dir.join("unused").to_string_lossy().into(), exact: Some(target.to_string_lossy().into()) };
+        let to = Destination { dir: dir.join("unused").to_string_lossy().into(), exact: Some(target.to_string_lossy().into()), ..Default::default() };
         let opts = ExportOptions::default();
         let skipped = disk_batch(&mut s, id, &ExportOptions { conflict: Conflict::Skip, ..opts.clone() }, &to).unwrap();
         assert_eq!(skipped[0]["skipped"], target.to_string_lossy().as_ref());
@@ -455,7 +455,7 @@ fn explicit_export_paths_follow_the_conflict_policy() {
         // an original or a folder is refused whatever the policy
         for exact in [src.to_string_lossy().to_string(), dir.to_string_lossy().to_string()] {
             for conflict in [Conflict::Unique, Conflict::Skip, Conflict::Overwrite] {
-                let to = Destination { dir: String::new(), exact: Some(exact.clone()) };
+                let to = Destination { dir: String::new(), exact: Some(exact.clone()), ..Default::default() };
                 assert!(disk_batch(&mut s, id, &ExportOptions { conflict, ..opts.clone() }, &to).is_err(), "{exact} {conflict:?}");
             }
         }
@@ -470,7 +470,7 @@ fn explicit_export_paths_follow_the_conflict_policy() {
         std::fs::create_dir_all(&out).unwrap();
         let theirs = out.join("IMG_1.xmp");
         std::fs::write(&theirs, b"someone else's sidecar").unwrap();
-        let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+        let to = Destination { dir: out.to_string_lossy().to_string(), exact: None, ..Default::default() };
         let o = ExportOptions { format: ExportFormat::Original, naming: "{name}".into(), ..Default::default() };
 
         // Unique: the photo and its sidecar both move to the next free name
@@ -506,7 +506,7 @@ fn explicit_export_paths_follow_the_conflict_policy() {
 fn export_never_overwrites_an_original() {
     use crate::export::{Conflict, Destination};
     let (mut s, id, dir, src, original) = library_with_jpeg("export-guard");
-    let folder = Destination { dir: dir.to_string_lossy().to_string(), exact: None };
+    let folder = Destination { dir: dir.to_string_lossy().to_string(), exact: None, ..Default::default() };
     let o = ExportOptions { naming: "{name}".into(), conflict: Conflict::Overwrite, ..Default::default() };
     let err = disk_batch(&mut s, id, &o, &folder).unwrap_err();
     assert!(err.contains("original of IMG_1.jpg"), "{err}");
@@ -515,7 +515,7 @@ fn export_never_overwrites_an_original() {
     // the exact path of the control channel / MCP, also spelled another way
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     for exact in [src.to_string_lossy().to_string(), dir.join("sub/../IMG_1.jpg").to_string_lossy().to_string()] {
-        let to = Destination { dir: String::new(), exact: Some(exact) };
+        let to = Destination { dir: String::new(), exact: Some(exact), ..Default::default() };
         assert!(disk_batch(&mut s, id, &o, &to).unwrap_err().contains("never writes over an original"));
     }
     // the "Original" format re-writing the file onto itself (and its sidecar)
@@ -549,7 +549,7 @@ fn a_waiting_export_checks_the_originals_catalogued_while_it_waited() {
     let theirs = crate::export::encode_image(&img, &ExportOptions::default()).unwrap();
     std::fs::write(&later, &theirs).unwrap();
     let o = ExportOptions { conflict: Conflict::Overwrite, ..Default::default() };
-    let to = Destination { dir: String::new(), exact: Some(later.to_string_lossy().to_string()) };
+    let to = Destination { dir: String::new(), exact: Some(later.to_string_lossy().to_string()), ..Default::default() };
     // prepared while LATER.jpg is still an ordinary file, which is imported while the export waits
     let mut waiting = prepare_export(&mut s, id, &o, 1).unwrap();
     s.execute("library.import", &json!({"paths": [later.to_string_lossy()]})).unwrap();
@@ -571,7 +571,7 @@ fn a_failed_export_write_keeps_the_previous_file() {
     std::fs::create_dir_all(&out).unwrap();
     let prev = out.join("IMG_1.jpg");
     std::fs::write(&prev, b"last week's export").unwrap();
-    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None, ..Default::default() };
     let o = ExportOptions { conflict: Conflict::Overwrite, ..Default::default() };
     {
         let _fault = lcc_catalog::safe_file::fail_writes_after(100);
@@ -601,7 +601,7 @@ fn export_protects_the_target_of_an_imported_symlink() {
     let id = s.catalog.photos().next().unwrap().id;
     s.execute("develop.set", &json!({"ids": [id.0], "control": "light.exposure", "value": 1.0})).unwrap();
     let o = ExportOptions { conflict: Conflict::Overwrite, ..Default::default() };
-    let to = Destination { dir: String::new(), exact: Some(src.to_string_lossy().to_string()) };
+    let to = Destination { dir: String::new(), exact: Some(src.to_string_lossy().to_string()), ..Default::default() };
     let result = disk_batch(&mut s, id, &o, &to);
     assert!(result.is_err(), "export replaced the original through its imported alias: {result:?}");
     assert_eq!(std::fs::read(&src).unwrap(), original);
@@ -619,7 +619,7 @@ fn exports_are_atomic_without_a_sync() {
     use lcc_catalog::safe_file::syncs_on_this_thread;
     let (mut s, id, dir, _src, _) = library_with_jpeg("export-nosync");
     let out = dir.join("out");
-    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None, ..Default::default() };
     let o = ExportOptions { conflict: Conflict::Unique, ..Default::default() };
     let before = syncs_on_this_thread();
     for _ in 0..3 {
@@ -1047,7 +1047,7 @@ fn remove_location_allows_original_without_embedded_location() {
         let id = session.catalog.photos().next().unwrap().id;
         let options = ExportOptions { format: ExportFormat::Original, remove_location: true, ..Default::default() };
         let items = prepare_batch(&mut session, &[id], &options).unwrap();
-        let destination = Destination { dir: output.to_string_lossy().to_string(), exact: None };
+        let destination = Destination { dir: output.to_string_lossy().to_string(), exact: None, ..Default::default() };
         let mut writes = Vec::new();
         let mut write = |path: &str, bytes: &[u8]| -> Result<(), String> {
             writes.push(path.to_string());
@@ -1267,7 +1267,7 @@ mod apple_photos {
         let dir = temp_dir(tag);
         let ids: Vec<_> = s.visible().iter().copied().take(2).collect();
         let o = ExportOptions::from_json(&json!({"longEdge": 48, "naming": "{name}-{seq}"}));
-        let to = Destination { dir: dir.to_string_lossy().into(), exact: None };
+        let to = Destination { dir: dir.to_string_lossy().into(), exact: None, ..Default::default() };
         let mut files = Vec::new();
         for id in ids {
             files.extend(disk_batch(s, id, &o, &to).unwrap());
@@ -1537,7 +1537,7 @@ fn same_folder_as_original_exports_next_to_each_photo() {
         let ids: Vec<_> = s.catalog.photos().map(|p| p.id).collect();
         assert_eq!(ids.len(), 2);
         // the folder of a specific-folder export is not used
-        let to = Destination { dir: dir.join("unused").to_string_lossy().to_string(), exact: None };
+        let to = Destination { dir: dir.join("unused").to_string_lossy().to_string(), exact: None, ..Default::default() };
         let o = ExportOptions { destination_mode: DestinationMode::SameAsOriginal, subfolder: "Exports".into(), ..Default::default() };
         let exists = |p: &str| std::path::Path::new(p).exists();
         let files = crate::export::export_batch(&mut s, &ids, &o, &to, &mut crate::export::write_file, &exists).unwrap();
@@ -1571,7 +1571,7 @@ fn same_folder_as_original_exports_next_to_each_photo() {
         use crate::export::{Destination, DestinationMode};
         let small = ExportOptions::from_json(&json!({"longEdge": 32}));
         let o = ExportOptions { destination_mode: DestinationMode::SameAsOriginal, subfolder: "Exports".into(), ..small };
-        let to = Destination { dir: "out".into(), exact: None };
+        let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
         let mut s = Session::with_demo();
         let ids: Vec<_> = s.catalog.photos().take(2).map(|p| p.id).collect();
         let mut written = Vec::new();
@@ -1623,7 +1623,7 @@ fn custom_name_sequence_follows_selection_order() {
     let names: Vec<_> = items.iter().map(|i| i.file_name.clone()).collect();
     assert_eq!(ExportOptions::from_params(&ExportOptions::known_keys_only(&o.to_json())).unwrap(), o, "kept in presets");
     assert_eq!(names, ["Trip_Day (7).jpg", "Trip_Day (8).jpg", "Trip_Day (9).jpg"], "separators in the custom text never make a path");
-    let to = Destination { dir: "out".into(), exact: None };
+    let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
     let mut written = Vec::new();
     let mut write = |p: &str, _: &[u8]| -> Result<(), String> {
         written.push(p.to_string());
@@ -1658,7 +1658,7 @@ fn hostile_subfolders_are_refused() {
         let o = ExportOptions { destination_mode: mode, subfolder: "../../x".into(), ..small };
         let items = crate::export::prepare_batch(&mut s, &ids, &o).unwrap();
         let mut write = |p: &str, _: &[u8]| -> Result<(), String> { Err(format!("wrote {p}")) };
-        let to = Destination { dir: "out".into(), exact: None };
+        let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
         let files = crate::export::run_batch(items, &o, &to, &mut write, &|_| true, false, &mut |_, _| true).unwrap();
         assert!(files[0]["error"].as_str().unwrap().contains("subfolder"), "{files:?}");
     }
@@ -1680,7 +1680,7 @@ fn overwrite_never_clobbers_a_file_of_the_same_batch() {
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
     std::fs::write(out.join("IMG_1.jpg"), b"an earlier run").unwrap();
-    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None };
+    let to = Destination { dir: out.to_string_lossy().to_string(), exact: None, ..Default::default() };
     let o = ExportOptions { naming: "{name}".into(), conflict: Conflict::Overwrite, ..Default::default() };
     let files = crate::export::export_batch(&mut s, &ids, &o, &to, &mut crate::export::write_file, &|p| std::path::Path::new(p).exists()).unwrap();
     let paths: Vec<_> = files.iter().map(|f| f["path"].as_str().unwrap_or_default().to_string()).collect();

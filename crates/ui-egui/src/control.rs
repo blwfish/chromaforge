@@ -845,7 +845,8 @@ pub fn export_active(app: &mut LccApp, p: &Value) -> Result<Value, String> {
     if dir.is_empty() && exact.is_none() && !own_folders {
         return Err(NO_EXPORT_FOLDER.into());
     }
-    let to = Destination { dir: dir.clone(), exact };
+    // the host's new-file writer: Unique and Skip never replace a file that appears meanwhile
+    let to = Destination { dir: dir.clone(), exact, write_new: app.services.write_new };
     let background = p.get("background").and_then(Value::as_bool).unwrap_or(false) && app.services.write_shared.is_some();
     // Add to Apple Photos: refused here, before anything is written, when it can't be done. An export that
     // waits behind a running one reserves Photos when it starts (the running one may hold it; issue #2965).

@@ -43,7 +43,7 @@ fn import_one(s: &mut Session, path: &Path) -> PhotoId {
 /// Exports `id` as a full-size JPEG into `dir`; returns the file's path.
 fn export_jpeg(s: &mut Session, id: PhotoId, dir: &Path, naming: &str) -> std::path::PathBuf {
     let o = ExportOptions { quality: 90, naming: naming.into(), ..ExportOptions::default() };
-    let to = Destination { dir: dir.to_string_lossy().into_owned(), exact: None };
+    let to = Destination { dir: dir.to_string_lossy().into_owned(), exact: None, ..Default::default() };
     let mut write = |p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string());
     let files = export_batch(s, &[id], &o, &to, &mut write, &|p| Path::new(p).exists()).expect("the export runs");
     assert_eq!(files.len(), 1, "{files:?}");
@@ -142,7 +142,7 @@ fn exporting_a_photo_whose_original_is_gone_is_an_error_not_a_panic() {
     s.media.forget(id);
     std::fs::remove_file(&original).expect("the original is removed");
     let o = ExportOptions::default();
-    let to = Destination { dir: out.path().to_string_lossy().into_owned(), exact: None };
+    let to = Destination { dir: out.path().to_string_lossy().into_owned(), exact: None, ..Default::default() };
     let mut write = |p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| e.to_string());
     match export_batch(&mut s, &[id], &o, &to, &mut write, &|_| false) {
         Err(e) => assert!(!e.is_empty()),

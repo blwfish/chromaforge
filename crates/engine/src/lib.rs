@@ -2936,6 +2936,8 @@ mod tests_export;
 #[cfg(test)]
 mod tests_export_binning;
 #[cfg(test)]
+mod tests_export_new_files;
+#[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests_export_video;
 #[cfg(test)]

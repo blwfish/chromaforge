@@ -238,7 +238,8 @@ fn edit_copy(s: &mut Session, p: &Value, id: lcc_catalog::PhotoId, opts: &crate:
         written.push(path.to_string());
         Ok(())
     };
-    let to = crate::export::Destination { dir: dir.clone(), exact: None };
+    // (written durably through `write`, which records the file: no separate new-file writer)
+    let to = crate::export::Destination { dir: dir.clone(), exact: None, write_new: None };
     crate::export::export_batch(s, &[id], opts, &to, &mut write, &|path| Path::new(path).exists()).map_err(|e| bad(cmd, e))?;
     let ext = format!(".{}", opts.format.extension());
     let out = written.into_iter().find(|w| w.ends_with(&ext)).ok_or_else(|| bad(cmd, "nothing was written"))?;

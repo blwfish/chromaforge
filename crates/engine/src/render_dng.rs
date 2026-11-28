@@ -99,7 +99,8 @@ impl RenderDngJob {
             if !progress(i) {
                 return (out, true);
             }
-            let to = Destination { dir, exact: None };
+            // (`write` is the host's; Unique's check-then-write window remains here, see FX-143)
+            let to = Destination { dir, exact: None, write_new: None };
             let files = run_batch(vec![item], &self.opts, &to, write, &|path| Path::new(path).exists(), true, &mut |_, _| true);
             let result = files.and_then(|files| {
                 let f = files.first().ok_or("nothing was written")?;

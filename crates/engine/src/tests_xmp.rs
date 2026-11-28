@@ -1871,7 +1871,15 @@ fn dng_export_compression_choices() {
             out = b.to_vec();
             Ok(())
         };
-        crate::export::export_batch(&mut s, &[id], &o, &crate::export::Destination { dir: "x".into(), exact: None }, &mut write, &|_| false).unwrap();
+        crate::export::export_batch(
+            &mut s,
+            &[id],
+            &o,
+            &crate::export::Destination { dir: "x".into(), exact: None, ..Default::default() },
+            &mut write,
+            &|_| false,
+        )
+        .unwrap();
         let raw = lcc_raw::decode(&out).unwrap_or_else(|e| panic!("{c}: {e}"));
         assert!(raw.width > 1000, "{c}");
         sizes.push((c, out.len()));
@@ -1915,7 +1923,15 @@ fn dngs_of_raws_without_colour_matrices_carry_the_colour_they_open_with() {
             exported = b.to_vec();
             Ok(())
         };
-        crate::export::export_batch(&mut s, &[id], &o, &crate::export::Destination { dir: "x".into(), exact: None }, &mut write, &|_| false).unwrap();
+        crate::export::export_batch(
+            &mut s,
+            &[id],
+            &o,
+            &crate::export::Destination { dir: "x".into(), exact: None, ..Default::default() },
+            &mut write,
+            &|_| false,
+        )
+        .unwrap();
         let converted = crate::cmd::convert::write_dng_with(None, &path.to_string_lossy(), String::new()).unwrap();
         for (how, dng) in [("export", exported), ("convert", std::fs::read(&converted).unwrap())] {
             let back = lcc_raw::decode(&dng).unwrap();
@@ -2353,7 +2369,15 @@ fn lossy_dng_export_scales_and_shrinks() {
             out = b.to_vec();
             Ok(())
         };
-        crate::export::export_batch(&mut s, &[id], &o, &crate::export::Destination { dir: "x".into(), exact: None }, &mut write, &|_| false).unwrap();
+        crate::export::export_batch(
+            &mut s,
+            &[id],
+            &o,
+            &crate::export::Destination { dir: "x".into(), exact: None, ..Default::default() },
+            &mut write,
+            &|_| false,
+        )
+        .unwrap();
         out
     };
     let lossless = export(json!({"format": "dng"}));

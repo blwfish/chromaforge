@@ -354,6 +354,18 @@ pub fn write_new(path: &Path, data: &[u8]) -> io::Result<()> {
     write_new_unique(&mut std::iter::once(path.to_path_buf()), data).map(|_| ())
 }
 
+/// [`write_new`] for an output that can always be made again (an export), so neither synced nor
+/// read back (as [`write_atomic_nosync`]): `data` goes to a temp file, which takes the name `path`
+/// only while it is free ([`publish_new`]). Never replaces a file, also not one that appeared
+/// after the caller looked: `AlreadyExists` then, with that file left as it is.
+pub fn write_new_nosync(path: &Path, data: &[u8]) -> io::Result<()> {
+    let (tmp, _) = write_temp(path, None, &mut |w| w.write_all(data))?;
+    let r = publish_new(&tmp, path);
+    // after a hard link the temp name is a second name of the new file; after a rename it's gone
+    let _ = fs::remove_file(&tmp);
+    r
+}
+
 /// [`write_new`] under the first free name of `candidates` (all in the same folder, e.g.
 /// `IMG_1.dng`, `IMG_1-2.dng`, …): the file is written once and then given the first name that
 /// is not taken. Returns that name; `AlreadyExists` when every candidate is taken.

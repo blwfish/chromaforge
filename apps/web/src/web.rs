@@ -235,6 +235,8 @@ fn services(originals: Originals, backend: Option<Backend>, files: Files, frozen
         pick_print_templates: None,
         save_print_template: None,
         write: Some(Box::new(download)),
+        // a download is named by the browser: there is no folder of ours for a file to appear in
+        write_new: None,
         // downloads happen on the main thread: exports run in the foreground on the web
         write_shared: None,
         png: Some(Box::new(|img: &lcc_raster::Rgba8| {

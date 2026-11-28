@@ -123,7 +123,7 @@ pub fn prepare(s: &mut crate::Session, p: &Value) -> Result<Prepared, String> {
         if folder.trim().is_empty() && opts.destination_mode != DestinationMode::SameAsOriginal {
             return Err(format!("preset `{name}` names no folder: pass `dir`"));
         }
-        recipes.push(Recipe { name: name.clone(), opts, to: Destination { dir: folder, exact: None } });
+        recipes.push(Recipe { name: name.clone(), opts, to: Destination::on_disk(folder, None) });
     }
     let mut steps: Vec<Step> = ids
         .iter()

@@ -1,0 +1,3 @@
+## Import, export and formats
+
+- **Add Number and Skip never replace a file:** under these conflict choices an export checked whether a name was free, then wrote with a rename that replaced whatever was there by then, so a file another export or a sync app wrote in that moment was lost while the export reported success. The file and its sidecars are now written as new files (an exclusive link or create), and a name taken meanwhile moves the photo to the next number (Add Number) or skips it (Skip). Overwrite is unchanged. On the desktop, the command line and MCP; Render to DNG and Edit In still check first (not changed here).

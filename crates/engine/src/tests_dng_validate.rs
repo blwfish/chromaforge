@@ -88,7 +88,7 @@ fn exported_photos_are_marked_and_reset_export_status_clears_them() {
     assert!(dng_targets(&s, &[id]).is_empty(), "only DNG files are checked: a JPEG is not one");
 
     let out = dir.join("out");
-    let to = Destination { dir: out.to_string_lossy().into(), exact: None };
+    let to = Destination { dir: out.to_string_lossy().into(), exact: None, ..Default::default() };
     let mut written = Vec::new();
     let files = export_batch(
         &mut s,

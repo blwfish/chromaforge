@@ -91,7 +91,7 @@ pub fn start(app: &mut LccApp, p: &Value) -> Result<Value, String> {
     let after = app.session.after_export(&opts)?;
     let items = lcc_engine::export::prepare_batch(&mut app.session, &ids, &opts)?;
     let dir = email::temp_dir(lcc_brand::BINARY)?;
-    let to = Destination { dir: dir.to_string_lossy().into_owned(), exact: None };
+    let to = Destination { dir: dir.to_string_lossy().into_owned(), exact: None, ..Default::default() };
     let desktop = app.session.desktop.clone();
     let then: crate::export_task::Then = Box::new(move |files: &[Value]| {
         let paths: Vec<PathBuf> = files.iter().filter_map(|f| f.get("path").and_then(Value::as_str)).map(PathBuf::from).collect();

@@ -3082,6 +3082,23 @@ pub enum DngCompression {
 pub struct Destination {
     pub dir: String,
     pub exact: Option<String>,
+    /// How to write a file that must not replace one: [`write_file_new`] for a folder on disk
+    /// ([`Destination::on_disk`]). Unique and Skip write through it, so a file that appears
+    /// during the export (another export into the folder, a sync client) is never replaced.
+    /// `None` for a sink with no folder of its own (the browser's downloads, measurements):
+    /// the batch's own writer then writes every file.
+    pub write_new: Option<NewFileWrite>,
+}
+
+/// Writes a new file ([`write_file_new`]): `Ok(false)` when the name is taken.
+pub type NewFileWrite = fn(&str, &[u8]) -> Result<bool, String>;
+
+impl Destination {
+    /// A destination on this computer's disk: folder `dir`, or the file `exact`, with
+    /// [`write_file_new`] for the files that must be new.
+    pub fn on_disk(dir: String, exact: Option<String>) -> Self {
+        Destination { dir, exact, write_new: Some(write_file_new) }
+    }
 }
 
 /// What happens after an export has written its files (Lightroom's Post-Processing): nothing, or
@@ -3250,6 +3267,22 @@ pub fn write_file(path: &str, bytes: &[u8]) -> Result<(), String> {
 /// and so can't simply be exported again once the catalog points at it.
 pub fn write_file_durable(path: &str, bytes: &[u8]) -> Result<(), String> {
     write_with(path, bytes, true)
+}
+
+/// [`write_file`] for a file that must be new (Unique and Skip): never replaces a file, also not
+/// one that appeared after the caller looked ([`lcc_catalog::safe_file::write_new_nosync`]: a
+/// temp file given the name only while it is free). `Ok(false)` when the name is taken; the file
+/// there is left as it is.
+pub fn write_file_new(path: &str, bytes: &[u8]) -> Result<bool, String> {
+    let p = std::path::Path::new(path);
+    if let Some(dir) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    match lcc_catalog::safe_file::write_new_nosync(p, bytes) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("{path}: {e}")),
+    }
 }
 
 fn write_with(path: &str, bytes: &[u8], durable: bool) -> Result<(), String> {
@@ -3911,6 +3944,57 @@ struct Placer<'a> {
     stop_on_error: bool,
 }
 
+/// How a photo's result was placed by [`Placer::place`].
+enum Placed {
+    /// Its file (path), the file and its sidecars' paths, and the sidecars written.
+    Written(String, Vec<String>, Vec<String>),
+    /// Skipped (Skip): a file appeared under its name while it was being written.
+    Skipped(String),
+}
+
+/// How many names Unique tries for one photo when files keep appearing under the free names it
+/// picks (each try is a name `exists` said was free a moment before).
+const NEW_NAME_TRIES: usize = 100;
+
+/// Write `e`'s file and sidecars as the new files `files` (main first) with `write_new`. `None`
+/// when any of the names was taken by then: the files this call wrote are removed again, and
+/// what is at that name is left as it is. Otherwise the sidecars written.
+fn write_group_new(write_new: NewFileWrite, e: &Exported, files: &[String]) -> Result<Option<Vec<String>>, String> {
+    let Some(main) = files.first() else { return Err("no file name to write".into()) };
+    let wrote = match &e.video_file {
+        Some(f) => f.move_new_to(main)?,
+        None => write_new(main, &e.bytes)?,
+    };
+    if !wrote {
+        return Ok(None);
+    }
+    let mut sidecars = Vec::new();
+    for ((_, bytes), sc) in e.sidecars.iter().zip(files.iter().skip(1)) {
+        let wrote = match write_new(sc, bytes) {
+            Ok(wrote) => wrote,
+            Err(err) => {
+                remove_own(main, &sidecars);
+                return Err(err);
+            }
+        };
+        if !wrote {
+            remove_own(main, &sidecars);
+            return Ok(None);
+        }
+        sidecars.push(sc.clone());
+    }
+    Ok(Some(sidecars))
+}
+
+/// Remove the files [`write_group_new`] just created for one photo (`main` and `sidecars`): a
+/// photo is placed with all its files or none.
+fn remove_own(main: &str, sidecars: &[String]) {
+    for f in std::iter::once(main).chain(sidecars.iter().map(String::as_str)) {
+        // (only the files this export created a moment ago; a failure leaves a spare copy)
+        let _ = std::fs::remove_file(f);
+    }
+}
+
 fn join_path(a: &str, b: &str) -> String {
     if a.is_empty() { b.to_string() } else { format!("{}/{b}", a.trim_end_matches('/')) }
 }
@@ -3982,7 +4066,10 @@ impl<'a> Placer<'a> {
         // An explicitly requested folder or original is an error, not a candidate for renaming or skipping.
         let refused = if exact.is_some() { exact_target_refusal(&requested, guard) } else { Ok(()) };
         let taken = &self.taken;
-        let busy = |main: &str| group(main).iter().any(|p| taken.contains(p) || exists(p));
+        // names found taken only when this photo was written to them (a file that appeared after
+        // `exists` looked): never replaced under Unique and Skip, see `write_new` below
+        let appeared = std::cell::RefCell::new(std::collections::HashSet::<String>::new());
+        let busy = |main: &str| group(main).iter().any(|p| taken.contains(p) || appeared.borrow().contains(p) || exists(p));
         let unique = || {
             // keep the requested folder and basename, split as the sidecars' names are
             let (folder, stem, ext) = split_file_name(&requested);
@@ -4008,26 +4095,44 @@ impl<'a> Placer<'a> {
         };
         let file = path.clone().unwrap_or_else(|_| exact.map_or_else(|| name.clone(), str::to_string));
         let write = &mut *self.write;
-        let written = path.and_then(|path| {
-            let files = group(&path);
-            // never over an original, whatever the conflict policy or the exact path said
-            // (rechecked for the selected main file too: collision probes can outlive its early validation)
-            for f in &files {
-                guard.check(std::path::Path::new(f))?;
+        // Unique and Skip promise never to replace a file: `busy` looked a moment ago, so on disk
+        // the file and its sidecars are written as new ones, and a name taken meanwhile (another
+        // export into the folder, a sync client) is the next free name (Unique) or a skip (FX-143)
+        let write_new = self.to.write_new.filter(|_| matches!(o.conflict, Conflict::Unique | Conflict::Skip));
+        let written = path.and_then(|mut path| {
+            for _ in 0..NEW_NAME_TRIES {
+                let files = group(&path);
+                // never over an original, whatever the conflict policy or the exact path said
+                // (rechecked for the selected main file too: collision probes can outlive its early validation)
+                for f in &files {
+                    guard.check(std::path::Path::new(f))?;
+                }
+                let Some(write_new) = write_new else {
+                    match &e.video_file {
+                        Some(f) => f.move_to(&path)?,
+                        None => write(&path, &e.bytes)?,
+                    }
+                    let mut sidecars = Vec::new();
+                    for ((_, bytes), sc) in e.sidecars.iter().zip(files.iter().skip(1)) {
+                        write(sc, bytes)?;
+                        sidecars.push(sc.clone());
+                    }
+                    return Ok(Placed::Written(path, files, sidecars));
+                };
+                if let Some(sidecars) = write_group_new(write_new, &e, &files)? {
+                    return Ok(Placed::Written(path, files, sidecars));
+                }
+                appeared.borrow_mut().extend(files);
+                if o.conflict == Conflict::Skip {
+                    return Ok(Placed::Skipped(path));
+                }
+                path = unique()?;
             }
-            match &e.video_file {
-                Some(f) => f.move_to(&path)?,
-                None => write(&path, &e.bytes)?,
-            }
-            let mut sidecars = Vec::new();
-            for ((_, bytes), sc) in e.sidecars.iter().zip(files.iter().skip(1)) {
-                write(sc, bytes)?;
-                sidecars.push(sc.clone());
-            }
-            Ok((path, files, sidecars))
+            Err(format!("{requested}: no free file name (other files kept appearing under the names tried)"))
         });
         match written {
-            Ok((path, files, sidecars)) => {
+            Ok(Placed::Skipped(path)) => self.out.push(json!({"skipped": path})),
+            Ok(Placed::Written(path, files, sidecars)) => {
                 self.taken.extend(files);
                 let mut entry = json!({"photo": photo.0, "path": path, "width": e.width, "height": e.height, "bytes": e.len(), "sidecars": sidecars});
                 if e.video_file.is_some() {
@@ -5949,7 +6054,7 @@ mod tests {
         cancel_at: usize,
     ) -> (Result<Vec<serde_json::Value>, String>, Vec<(String, Vec<u8>)>, Vec<(usize, String)>) {
         let items = prepare_batch(s, ids, o).unwrap();
-        let to = Destination { dir: "out".into(), exact: None };
+        let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
         let mut written = Vec::new();
         let mut write = |p: &str, b: &[u8]| {
             written.push((p.to_string(), b.to_vec()));
@@ -6049,7 +6154,7 @@ mod tests {
         let items = prepare_batch(&mut s, &ids, &o).unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let to = Destination { dir: "out".into(), exact: None };
+            let to = Destination { dir: "out".into(), exact: None, ..Default::default() };
             let mut write = |_: &str, _: &[u8]| Ok(());
             let mut calls = 0;
             let mut progress = |_: usize, _: &str| {

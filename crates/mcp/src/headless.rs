@@ -138,7 +138,7 @@ impl Headless {
         let files = run_batch(
             items,
             &opts,
-            &Destination { dir: dir.to_string(), exact: exact.map(str::to_string) },
+            &Destination::on_disk(dir.to_string(), exact.map(str::to_string)),
             write,
             &|path| Path::new(path).exists(),
             true,

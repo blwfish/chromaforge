@@ -719,6 +719,10 @@ pub struct Services {
     /// Save dialog for an exported print template (`.lcprint`).
     pub save_print_template: Option<SaveFile>,
     pub write: Option<WriteFn>,
+    /// Writes a file that must be new ([`lcc_engine::export::write_file_new`] on disk): exports
+    /// under Unique and Skip use it so a file that appears while they run is never replaced.
+    /// None (the web, tests with their own `write`): `write` writes every file.
+    pub write_new: Option<lcc_engine::export::NewFileWrite>,
     /// Thread-safe writer: with it, UI-started exports run in the background (desktop only).
     pub write_shared: Option<SharedWrite>,
     /// PNG encoder (the host links an image encoder; the UI crate stays codec-free).
