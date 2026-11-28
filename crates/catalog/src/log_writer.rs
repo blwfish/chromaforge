@@ -116,6 +116,19 @@ fn write_fails(_: &Path) -> bool {
     false
 }
 
+/// Logs whose replacement (the reset after a snapshot) fails (tests: a stalled share).
+#[cfg(test)]
+pub(crate) static FAIL_REPLACES: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn replace_fails(path: &Path) -> bool {
+    FAIL_REPLACES.lock().unwrap_or_else(PoisonError::into_inner).iter().any(|p| p == path)
+}
+#[cfg(not(test))]
+fn replace_fails(_: &Path) -> bool {
+    false
+}
+
 struct Paths {
     dir: PathBuf,
     path: PathBuf,
@@ -195,6 +208,9 @@ impl Log {
     fn replace(&mut self, p: &Paths, data: &[u8]) -> io::Result<()> {
         self.file = None;
         let written = (|| {
+            if replace_fails(&p.path) {
+                return Err(io::Error::other("the share stopped answering (test)"));
+            }
             let mut f = crate::store::create_staging(&p.tmp)?;
             f.write_all(data)?;
             sync_file(&f, false)?;

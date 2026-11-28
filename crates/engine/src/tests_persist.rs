@@ -216,3 +216,118 @@ fn a_preset_that_cannot_be_written_counts_as_unsaved_until_it_is() {
     assert!(s.unsaved().is_none(), "written once the disk works again");
     assert!(String::from_utf8_lossy(&stored(&files)).contains("Mine"));
 }
+
+/// A store whose log is written "by a thread of its own", as natively: an append is handed over at once, and a
+/// failed write shows up later in [`Store::log_progress`]. Its log write and the log reset after a snapshot can be
+/// made to fail.
+#[derive(Clone, Default)]
+struct ThreadedLog {
+    files: MemStore,
+    /// The next log writes fail (a full disk); what was handed over is left out.
+    log_fails: Arc<AtomicBool>,
+    /// Replacing the log (its reset after a snapshot) fails.
+    reset_fails: Arc<AtomicBool>,
+    /// (durable length of the log, why a write failed)
+    progress: Arc<std::sync::Mutex<(u64, Option<String>)>>,
+    /// A failed write the thread hasn't reported yet.
+    unreported: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl ThreadedLog {
+    /// The thread gets round to reporting its failed write.
+    fn report_failure(&self) {
+        let why = self.unreported.lock().unwrap().take();
+        self.progress.lock().unwrap().1 = why;
+    }
+}
+
+impl Store for ThreadedLog {
+    fn read(&mut self, name: &str) -> std::io::Result<Option<Vec<u8>>> {
+        self.files.read(name)
+    }
+    fn write_atomic(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
+        if name == lcc_catalog::journal::LOG {
+            if self.reset_fails.load(Ordering::SeqCst) {
+                return Err(std::io::Error::other("share unavailable"));
+            }
+            *self.progress.lock().unwrap() = (data.len() as u64, None);
+        }
+        self.files.write_atomic(name, data)
+    }
+    fn append(&mut self, name: &str, data: &[u8]) -> std::io::Result<()> {
+        if name != lcc_catalog::journal::LOG {
+            return self.files.append(name, data);
+        }
+        let mut p = self.progress.lock().unwrap();
+        let mut unreported = self.unreported.lock().unwrap();
+        if p.1.is_some() || unreported.is_some() {
+            return Ok(()); // left out until the log is cut back or replaced, as the thread does
+        }
+        if self.log_fails.load(Ordering::SeqCst) {
+            *unreported = Some("no space left on the device".into());
+            return Ok(());
+        }
+        self.files.append(name, data)?;
+        p.0 += data.len() as u64;
+        Ok(())
+    }
+    fn truncate(&mut self, name: &str, len: u64) -> std::io::Result<()> {
+        self.files.truncate(name, len)?;
+        if name == lcc_catalog::journal::LOG {
+            let mut p = self.progress.lock().unwrap();
+            *p = (p.0.min(len), None);
+        }
+        Ok(())
+    }
+    fn describe(&self) -> String {
+        "threaded log".into()
+    }
+    fn log_progress(&self, name: &str) -> Option<lcc_catalog::store::LogProgress> {
+        (name == lcc_catalog::journal::LOG).then(|| {
+            let p = self.progress.lock().unwrap();
+            lcc_catalog::store::LogProgress { durable_len: p.0, failed: p.1.clone() }
+        })
+    }
+}
+
+fn open_threaded(store: &ThreadedLog, seed: bool) -> (Session, lcc_catalog::LoadReport) {
+    let mut s = Session::new();
+    let stores = LibraryStores { dir: "threaded".into(), catalog: Box::new(store.clone()), files: Box::new(MemStore::new()), on_disk: false };
+    let report = s.open_library_in(stores, seed).unwrap().clone();
+    (s, report)
+}
+
+/// A log write fails, the snapshot that saves what it lost is durable, then resetting the log after it fails (a
+/// stalled share). The snapshot holds the queued change: the command succeeds and the change is never appended
+/// again. (It used to be appended under a new number, and the next open replayed it a second time: a duplicate
+/// History step, or a duplicate added photo counted only as a failure.)
+#[test]
+fn a_change_a_durable_snapshot_saved_is_not_appended_again_when_the_log_reset_fails() {
+    let store = ThreadedLog::default();
+    let (mut s, _) = open_threaded(&store, true);
+    let id = s.selection.active.unwrap();
+    s.execute("photo.rate", &json!({"rating": 1})).unwrap();
+    store.log_fails.store(true, Ordering::SeqCst);
+    s.execute("photo.rate", &json!({"rating": 4})).unwrap(); // handed over; its write fails afterwards
+    store.log_fails.store(false, Ordering::SeqCst);
+    store.report_failure();
+    store.reset_fails.store(true, Ordering::SeqCst);
+    // the next append finds the lost one and is refused; a snapshot saves both, then the log reset fails
+    let journal = |s: &Session| (s.library.as_ref().unwrap().journal().seq(), s.library.as_ref().unwrap().journal().lost());
+    let (seq, lost) = journal(&s);
+    let flagged = s.execute("photo.flag", &json!({"flag": "pick"}));
+    assert_eq!(journal(&s), (seq + lost + 1, 0), "the snapshot holds the lost and the queued change");
+    assert!(flagged.is_ok(), "the change is saved: {flagged:?}");
+    assert!(s.pending_log.is_empty(), "so it is not queued for the log any more");
+    assert_eq!(s.unsaved(), None);
+    store.reset_fails.store(false, Ordering::SeqCst);
+    s.execute("photo.rate", &json!({"rating": 2})).unwrap();
+    s.flush_catalog().unwrap();
+    let expect = s.catalog.to_snapshot();
+    drop(s);
+    let (s2, r) = open_threaded(&store, true);
+    assert_eq!(s2.catalog.to_snapshot(), expect);
+    let p = s2.catalog.photo(id).unwrap();
+    assert_eq!((p.rating, p.flag), (2, Flag::Pick));
+    assert_eq!((r.replayed, r.failed), (1, 0), "only the change after the snapshot replays: {r:?}");
+}

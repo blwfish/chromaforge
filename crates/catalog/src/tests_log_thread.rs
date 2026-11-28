@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::journal::LOG;
-use crate::log_writer::FAIL_WRITES;
+use crate::log_writer::{FAIL_REPLACES, FAIL_WRITES};
 use crate::*;
 
 struct Dir(PathBuf);
@@ -24,6 +24,7 @@ impl Dir {
 impl Drop for Dir {
     fn drop(&mut self) {
         FAIL_WRITES.lock().unwrap().retain(|p| !p.starts_with(&self.0));
+        FAIL_REPLACES.lock().unwrap().retain(|p| !p.starts_with(&self.0));
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -173,6 +174,41 @@ fn a_failed_write_loses_nothing_once_a_snapshot_saves_it() {
     let (j2, c2, report) = open(&d.0);
     assert!(report.damaged.is_none());
     assert_eq!(j2.seq(), seq);
+    assert_eq!(rating(&c2, id), 3);
+}
+
+/// The contract the engine relies on (`Session::persist`, `close_library`): once the snapshot that saves the lost
+/// and queued ops is durable, `seq` counts them even when resetting the log after it fails, and that failure is
+/// still returned. The caller must then drop the queued ops, never append them again; the log keeps its old
+/// records, which the next open skips, and appends go on after them.
+#[test]
+fn a_durable_snapshot_counts_the_queued_ops_even_when_the_log_reset_fails() {
+    let d = Dir::new("reset-fails");
+    let (mut j, mut c, _) = open(&d.0);
+    j.append(&add_photo(&mut c)).unwrap();
+    let id = c.photos().next().unwrap().id;
+    j.append(&rate(&mut c, id, 1)).unwrap();
+    j.flush().unwrap();
+    FAIL_WRITES.lock().unwrap().push(d.0.join(LOG));
+    j.append(&rate(&mut c, id, 4)).unwrap(); // handed over, then lost
+    assert!(j.flush().is_err());
+    FAIL_WRITES.lock().unwrap().clear();
+    let queued = rate(&mut c, id, 5); // its append is refused (it would follow a hole)
+    assert!(j.append(&queued).is_err());
+    let before = j.seq() + j.lost();
+    FAIL_REPLACES.lock().unwrap().push(d.0.join(LOG));
+    let e = j.snapshot_with_unlogged(&c, queued.len() as u64).unwrap_err();
+    assert!(e.to_string().contains("stopped answering"), "{e}");
+    assert_eq!(j.seq(), before + queued.len() as u64, "the durable snapshot holds the lost and the queued ops");
+    assert_eq!(j.lost(), 0);
+    FAIL_REPLACES.lock().unwrap().clear();
+    j.append(&rate(&mut c, id, 3)).unwrap();
+    j.flush().unwrap();
+    let seq = j.seq();
+    drop(j);
+    let (j2, c2, report) = open(&d.0);
+    assert!(report.damaged.is_none(), "{report:?}");
+    assert_eq!((j2.seq(), report.replayed), (seq, 1), "the old records are skipped, the later one replays once");
     assert_eq!(rating(&c2, id), 3);
 }
 

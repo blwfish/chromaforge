@@ -1166,8 +1166,19 @@ impl Session {
                 // a log write failed after earlier changes were handed over (natively the log is
                 // written by a thread of its own): a snapshot now saves them and the queued ones
                 let queued = self.pending_log.len() as u64;
-                if lib.journal.snapshot_with_unlogged(&self.catalog, queued).is_ok() && lib.journal.lost() == 0 {
-                    log::warn!("library: a catalog log write failed; a snapshot saved every change");
+                let before = lib.journal.seq().saturating_add(lib.journal.lost());
+                let snapshot = lib.journal.snapshot_with_unlogged(&self.catalog, queued);
+                // Once the snapshot is durable it holds the queued ops, even when resetting the log after it then
+                // fails (that error is still returned): they are saved, and appending them again would give them
+                // new numbers after the snapshot's, so the next open would replay them a second time (as
+                // `close_library` already knew).
+                if lib.journal.seq() == before.saturating_add(queued) && lib.journal.lost() == 0 {
+                    match snapshot {
+                        Ok(()) => log::warn!("library: a catalog log write failed; a snapshot saved every change"),
+                        Err(e) => log::warn!(
+                            "library: a catalog log write failed; a snapshot saved every change, but the log could not be reset after it ({e})"
+                        ),
+                    }
                     appended = Ok(());
                 }
             }
