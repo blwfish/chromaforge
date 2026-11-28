@@ -2124,3 +2124,57 @@ fn remove_location_refuses_a_video_clips_original() {
     let e = export_photo(&mut s, id, &ExportOptions { format: ExportFormat::Original, ..Default::default() }, 1).unwrap();
     assert!(e.bytes.windows(9).any(|w| w == b"+48.8584+"), "the copy is the file");
 }
+
+/// FX-140: for an Original, the file's own position decides, not the library's. A position moved
+/// out of a private place, or cleared, in the library is still in the file, and the copy carried
+/// it: now the export is refused instead. A file whose position the library never had (or that
+/// holds only a place name after a cleared position) is copied as before.
+#[test]
+fn an_original_never_carries_a_position_cleared_or_moved_in_the_library() {
+    let dir = temp_dir("export-file-location");
+    let inside = lcc_meta::Metadata { gps: Some(lcc_meta::Gps { latitude: 48.8566, longitude: 2.3522, altitude: None }), ..Default::default() };
+    // (each file its own bytes: import would take a second identical file as a duplicate)
+    let near = lcc_meta::Metadata { gps: Some(lcc_meta::Gps { latitude: 48.8570, longitude: 2.3530, altitude: None }), ..Default::default() };
+    let city_only = lcc_meta::Metadata { city: Some("Paris".into()), ..Default::default() };
+    for (name, m) in [("Moved.jpg", &inside), ("Cleared.jpg", &near), ("CityOnly.jpg", &city_only)] {
+        std::fs::write(dir.join(name), jpeg_with_xmp(m)).unwrap();
+    }
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [dir.to_string_lossy()]})).unwrap();
+    s.execute("map.saveLocation", &json!({"name": "Home", "lat": 48.8566, "lon": 2.3522, "radius": 2000, "private": true})).unwrap();
+    let id = |s: &Session, n: &str| s.catalog.photos().find(|p| p.file_name == n).map(|p| p.id).unwrap();
+    let original = ExportOptions { format: ExportFormat::Original, ..Default::default() };
+    let set_gps = |s: &mut Session, id, gps| {
+        let mut meta = s.catalog.photo(id).unwrap().meta.clone();
+        meta.gps = gps;
+        s.catalog.apply(lcc_catalog::Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+    };
+
+    // inside the private place: refused (as before)
+    let moved = id(&s, "Moved.jpg");
+    assert!(s.catalog.photo(moved).unwrap().meta.gps.is_some(), "the position was imported");
+    assert!(export_photo(&mut s, moved, &original, 1).is_err(), "a private place's position stays home");
+    // moved in the library to somewhere else: the file still says home
+    set_gps(&mut s, moved, Some((-41.29, 174.78)));
+    let err = export_photo(&mut s, moved, &original, 1).err().expect("the file's position decides");
+    assert!(err.contains("can't remove the location"), "{err}");
+
+    // cleared in the library: the file's position must not come back with the copy
+    let cleared = id(&s, "Cleared.jpg");
+    s.execute("map.deleteLocation", &json!({"name": "Home"})).unwrap();
+    assert!(export_photo(&mut s, cleared, &original, 1).is_ok(), "with its position and no private place it is copied");
+    set_gps(&mut s, cleared, None);
+    assert!(s.catalog.photo(cleared).unwrap().meta.gps_removed.is_some());
+    let err = export_photo(&mut s, cleared, &original, 1).err().expect("cleared");
+    assert!(err.contains("cleared in the library") && err.contains("export as JPEG or TIFF"), "{err}");
+    // the rendered export carries no position either way
+    let e = export_photo(&mut s, cleared, &ExportOptions::default(), 1).unwrap();
+    assert!(lcc_meta::extract(&e.bytes).gps.is_none());
+
+    // a cleared position whose file holds only a place name: nothing to bring back
+    let city = id(&s, "CityOnly.jpg");
+    set_gps(&mut s, city, Some((1.0, 2.0)));
+    set_gps(&mut s, city, None);
+    assert!(s.catalog.photo(city).unwrap().meta.gps_removed.is_some());
+    assert!(export_photo(&mut s, city, &original, 1).is_ok(), "the city stays: only the position was cleared");
+}

@@ -2444,6 +2444,12 @@ enum Work {
         lossy_edge: Option<u32>,
         /// The original must not carry a location ([`removes_location`]).
         remove_location: bool,
+        /// The photo's GPS position was cleared in the library ([`lcc_catalog::Meta::gps_removed`]): the
+        /// original must not carry one.
+        gps_cleared: bool,
+        /// The library's private places (Map module): an original whose own position is inside one
+        /// must not carry a location, wherever the library places the photo now.
+        private_places: Vec<lcc_geo::SavedLocation>,
         label: String,
         size: (usize, usize),
         /// The photo's camera-profile choice (`profile.camera`): a DNG carries the colour the photo renders with.
@@ -2551,7 +2557,7 @@ pub(crate) fn prepare_guarded(
         };
         // a movie's location can sit in places no reader here checks in full (QuickTime and
         // Matroska tags, a camera's GPS track): its file is never copied when it must not carry one
-        if p.video.is_some() && removes_location(p, &session.catalog, o) {
+        if p.video.is_some() && (removes_location(p, &session.catalog, o) || p.meta.gps_removed.is_some()) {
             return Err(format!(
                 "{}: can't remove the location from a video clip's original file; export it in another format instead, which writes a new movie",
                 p.file_name
@@ -2572,6 +2578,8 @@ pub(crate) fn prepare_guarded(
                 u32::try_from(w.max(h)).unwrap_or(u32::MAX)
             }),
             remove_location: removes_location(p, &session.catalog, o),
+            gps_cleared: p.meta.gps_removed.is_some(),
+            private_places: session.catalog.saved_locations().filter(|l| l.private).cloned().collect(),
             label: p.file_name.clone(),
             size: (p.width as usize, p.height as usize),
         };
@@ -2949,16 +2957,22 @@ impl PreparedExport {
                 })
             }
 
-            Work::File { path, read, packet, dng, quality, lossy_edge, label, size, remove_location, camera } => {
+            Work::File { path, read, packet, dng, quality, lossy_edge, label, size, remove_location, gps_cleared, private_places, camera } => {
                 let bytes = match &read {
                     Some(r) => r(&path)?,
                     None => std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?,
                 };
                 let Some(dng) = dng else {
-                    // the file is copied byte for byte: refuse rather than leak a location it embeds
+                    // the file is copied byte for byte: refuse rather than leak a location it embeds.
+                    // What decides is the file's own location, not the library's (FX-140): the
+                    // library's may have been moved out of a private place, or cleared.
                     // DNG only for what the DNG export below takes
                     let instead = || if lcc_raw::probe(&bytes).is_some() { "JPEG, TIFF or DNG" } else { "JPEG or TIFF" };
-                    if remove_location {
+                    let in_private_place = !private_places.is_empty()
+                        && lcc_meta::extract(&bytes)
+                            .gps
+                            .is_some_and(|g| private_places.iter().any(|l| l.contains(lcc_geo::LatLon::new(g.latitude, g.longitude))));
+                    if remove_location || in_private_place {
                         // fail closed: a PSD whose metadata can't be read might hide a location
                         let metadata = lcc_meta::try_extract(&bytes)
                             .map_err(|e| format!("{label}: can't verify location metadata in this original file: {e}"))?;
@@ -2966,6 +2980,16 @@ impl PreparedExport {
                         if metadata.has_location() || embeds_xmp_location || lcc_meta::embeds_location(&bytes) {
                             return Err(format!(
                                 "{label}: can't remove the location from this original file: it contains GPS or place names, or its location metadata could not be fully checked; export as {} instead",
+                                instead()
+                            ));
+                        }
+                    } else if gps_cleared {
+                        // the position was cleared in the library: the copy must not bring it back
+                        let metadata = lcc_meta::try_extract(&bytes)
+                            .map_err(|e| format!("{label}: can't verify location metadata in this original file: {e}"))?;
+                        if metadata.gps.is_some() || original_embeds_xmp_location(&bytes, &label, lcc_meta::is_gps_property)? {
+                            return Err(format!(
+                                "{label}: its GPS position was cleared in the library, but this original file still holds one; export as {} instead",
                                 instead()
                             ));
                         }
