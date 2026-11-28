@@ -1085,7 +1085,7 @@ impl lcc_publish::PublishService for PluginService {
         };
         let r = self.with_publisher(|p| p.upload(&mut lcc_plugins::NoHost, &item));
         let _ = std::fs::remove_file(&path);
-        r.map(|r| lcc_publish::Published { remote_id: r.remote_id })
+        r.map(|r| lcc_publish::Published::new(r.remote_id))
     }
 
     fn remove(&mut self, remote_id: &str) -> std::result::Result<(), lcc_publish::PublishError> {
@@ -1975,7 +1975,7 @@ pub(crate) mod tests {
         assert!(is_plugin_kind("plugin:test.pub"));
         assert!(!is_plugin_kind("plugin:nope") && !is_plugin_kind("hardDrive"));
         let svc: lcc_publish::ServiceConfig = serde_json::from_value(json!({"id": "svc-9", "kind": "plugin:test.pub", "name": "P"})).unwrap();
-        let coll = lcc_publish::CollectionConfig { album: lcc_catalog::AlbumId(1), folder: "Web".into() };
+        let coll = lcc_publish::CollectionConfig { album: lcc_catalog::AlbumId(1), folder: "Web".into(), sidecars: Default::default() };
         let mut service = open_plugin_service(&svc, &coll).unwrap().unwrap();
         let up = lcc_publish::Upload { photo: lcc_catalog::PhotoId(7), file_name: "../evil/a.jpg", bytes: b"jpeg", sidecars: &[], previous: None };
         assert_eq!(service.publish(&up).unwrap().remote_id, "r1");

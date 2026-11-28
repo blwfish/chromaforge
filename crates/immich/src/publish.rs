@@ -353,7 +353,7 @@ impl PublishService for ImmichPublish {
                 self.client.album_remove(&album, &out_of_album).map_err(err)?;
             }
         }
-        Ok(Published { remote_id: remote_id(render.as_deref(), original.as_deref()) })
+        Ok(Published::new(remote_id(render.as_deref(), original.as_deref())))
     }
 
     fn comments(&mut self, remote_id: &str) -> Result<Vec<Comment>, PublishError> {

@@ -12,7 +12,7 @@ Kinds today:
 
 | Kind | What it does |
 |---|---|
-| Hard Drive (`hardDrive`) | renders into a folder you choose |
+| Hard Drive (`hardDrive`) | renders into a folder you choose; removing a photo moves only the files it wrote (the render, and the XMP sidecar of an Original export) to the system trash, and it never writes over a catalogued original or its sidecar |
 | Immich (`immich`) | uploads to a connected Immich server ([immich.md](../immich.md)) |
 | Plug-ins (`plugin:<id>`) | services provided by installed plug-ins ([plugins.md](../plugins.md), `plugin.publishServices`) |
 
@@ -33,7 +33,7 @@ Deleting a service or collection forgets what was published; the published files
 
 `publish.services` lists services and collection counts, `publish.status collection=<albumId>` the state of each
 photo, `publish.comments` comments where the service supports them. The configuration lives in `publish.json` in
-the library folder; what was published where is recorded in the catalog.
+the library folder, with the sidecars each Hard Drive collection wrote; what was published where is recorded in the catalog.
 
 Not yet: Flickr, SmugMug and other online services of the app's own. A plug-in can add one: it gets the user's
 service and its settings, the collection's name, each photo's title, caption and keywords, and can answer

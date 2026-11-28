@@ -20,7 +20,7 @@ fn sample(out: &std::path::Path) -> PublishConfig {
         settings: serde_json::json!({ "dir": out.display().to_string() }),
         export: serde_json::json!({ "format": "jpeg", "quality": 80, "long_edge": 2048 }),
         set: Some(AlbumId(7)),
-        collections: vec![CollectionConfig { album: AlbumId(8), folder: "Best of".into() }],
+        collections: vec![CollectionConfig { album: AlbumId(8), folder: "Best of".into(), sidecars: Default::default() }],
     });
     c
 }

@@ -64,6 +64,16 @@ pub struct Upload<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Published {
     pub remote_id: String,
+    /// The files written beside it (Hard Drive: an XMP sidecar), recorded so that only these are
+    /// ever removed with it.
+    pub sidecars: Vec<String>,
+}
+
+impl Published {
+    /// A publication with no files beside it.
+    pub fn new(remote_id: String) -> Self {
+        Published { remote_id, sidecars: Vec::new() }
+    }
 }
 
 /// A publish service, opened for one collection.

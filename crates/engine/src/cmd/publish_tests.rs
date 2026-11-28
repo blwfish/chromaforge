@@ -21,12 +21,24 @@ fn png(path: &Path, seed: u8) {
     std::fs::write(path, bytes).unwrap();
 }
 
-/// A library in a fresh folder. The folder comes first: bound first, it is dropped after the session.
+/// A library in a fresh folder. The folder comes first: bound first, it is dropped after the session. Its trash is
+/// the folder's `trash/` (never the system trash), see [`trashed`].
 fn library(tag: &str) -> (lcc_testkit::TempDir, Session) {
     let root = temp_dir(tag);
     let mut s = Session::new().with_fs();
     s.open_library(root.join("lib"), false).unwrap();
+    let bin = root.join("trash");
+    s.trash = Some(std::sync::Arc::new(move |p: &Path| {
+        std::fs::create_dir_all(&bin).map_err(|e| e.to_string())?;
+        let name = p.file_name().ok_or("no file name")?;
+        std::fs::rename(p, bin.join(name)).map_err(|e| e.to_string())
+    }));
     (root, s)
+}
+
+/// The names of the files moved to the test library's trash.
+fn trashed(root: &Path) -> Vec<String> {
+    files(&root.join("trash"))
 }
 
 fn import(s: &mut Session, root: &Path, n: u8) -> Vec<u64> {
@@ -113,6 +125,98 @@ fn hard_drive_publish_cycle() {
     assert_eq!(files(&out.join("Web")).len(), 2);
     s2.execute("publish.deleteService", &json!({"service": sid})).unwrap();
     assert!(s2.catalog.album(lcc_catalog::AlbumId(set)).is_none());
+}
+
+/// #1635: removing a photo from a Hard Drive collection deleted, for good, every `{stem}.xmp` beside the published
+/// file, here the user's own sidecar of a catalogued original that lives in the collection's folder. Only the files
+/// the collection wrote go, and to the trash.
+#[test]
+fn hard_drive_unpublish_keeps_an_originals_sidecar() {
+    let (root, mut s) = library("hd-original-sidecar");
+    let out = root.join("published");
+    let web = out.join("Web");
+    std::fs::create_dir_all(&web).unwrap();
+    // the user's original and its sidecar live in the folder the collection publishes to
+    png(&web.join("p0.png"), 77);
+    let sidecar = web.join("p0.xmp");
+    let theirs = lcc_meta::write_xmp(&lcc_meta::Metadata { title: Some("UserSidecar".into()), ..Default::default() }, None);
+    std::fs::write(&sidecar, &theirs).unwrap();
+    let id = s.execute("library.import", &json!({"paths": [web.join("p0.png").to_string_lossy()]})).unwrap()["imported"][0].as_u64().unwrap();
+    s.execute(
+        "publish.createService",
+        &json!({"name": "Disk", "dir": out.to_string_lossy(), "export": {"format": "jpeg", "longEdge": 20, "naming": "{name}"}}),
+    )
+    .unwrap();
+    s.execute("library.select", &json!({"ids": [id]})).unwrap();
+    let coll = s.execute("publish.createCollection", &json!({"service": "Disk", "name": "Web", "addSelected": true})).unwrap()["collection"]
+        .as_u64()
+        .unwrap();
+    let r = s.execute("publish.run", &json!({"collection": coll})).unwrap();
+    assert!(web.join("p0.jpg").exists(), "precondition: p0.jpg published into the originals' folder: {r}");
+    s.execute("album.removePhotos", &json!({"id": coll, "ids": [id]})).unwrap();
+    let r = s.execute("publish.run", &json!({"collection": coll})).unwrap();
+    assert_eq!(r["runs"][0]["removed"], json!([id]), "{r}");
+    assert!(std::fs::read(&sidecar).ok() == Some(theirs.into_bytes()), "the original's sidecar is kept: {r}");
+    assert!(web.join("p0.png").exists(), "the original is kept");
+    assert_eq!(files(&web), vec!["p0.png", "p0.xmp"]);
+    assert_eq!(trashed(&root), vec!["p0.jpg"], "only the published file, and to the trash");
+}
+
+/// #1635: the sidecars a Hard Drive collection writes (an Original export's `.xmp`) are recorded in `publish.json`
+/// and go with their photo; a sidecar with no record (from before the record) stays. Nothing is written over an
+/// original, or as a new sidecar of one.
+#[test]
+fn hard_drive_removes_only_recorded_sidecars_and_never_writes_an_originals_files() {
+    let (root, mut s) = library("hd-recorded");
+    let ids = import(&mut s, &root, 2);
+    let out = root.join("published");
+    s.execute("publish.createService", &json!({"name": "Disk", "dir": out.to_string_lossy(), "export": {"format": "original", "naming": "{name}"}}))
+        .unwrap();
+    s.execute("library.select", &json!({"ids": ids})).unwrap();
+    let coll = s.execute("publish.createCollection", &json!({"service": "Disk", "name": "Web", "addSelected": true})).unwrap()["collection"]
+        .as_u64()
+        .unwrap();
+    let r = s.execute("publish.run", &json!({"collection": coll})).unwrap();
+    let web = out.join("Web");
+    assert_eq!(files(&web), vec!["p0.png", "p0.xmp", "p1.png", "p1.xmp"], "{r}");
+    let lib = root.join("lib");
+    let recorded = |lib: &Path| lcc_publish::PublishConfig::load(lib).unwrap().services[0].collections[0].sidecars.clone();
+    assert_eq!(recorded(&lib).get("p0.png"), Some(&vec!["p0.xmp".to_string()]));
+
+    // a recorded sidecar goes with its photo
+    s.execute("album.removePhotos", &json!({"id": coll, "ids": [ids[0]]})).unwrap();
+    let r = s.execute("publish.run", &json!({"collection": coll})).unwrap();
+    assert_eq!(r["runs"][0]["removed"], json!([ids[0]]), "{r}");
+    assert_eq!(trashed(&root), vec!["p0.png", "p0.xmp"]);
+    assert!(!recorded(&lib).contains_key("p0.png"), "the record goes with the file");
+
+    // one published before sidecars were recorded: its `.xmp` may not be the collection's, so it stays
+    let mut cfg = lcc_publish::PublishConfig::load(&lib).unwrap();
+    cfg.services[0].collections[0].sidecars.clear();
+    cfg.save(&lib).unwrap();
+    s.execute("album.removePhotos", &json!({"id": coll, "ids": [ids[1]]})).unwrap();
+    let r = s.execute("publish.run", &json!({"collection": coll})).unwrap();
+    assert_eq!(r["runs"][0]["removed"], json!([ids[1]]), "{r}");
+    assert_eq!(files(&web), vec!["p1.xmp"]);
+    assert_eq!(trashed(&root), vec!["p0.png", "p0.xmp", "p1.png"]);
+
+    // a collection whose folder holds a catalogued original: publishing it as Original would rewrite the original
+    // and create its sidecar; the photo fails instead and both stay as they were
+    let own = out.join("Own");
+    std::fs::create_dir_all(&own).unwrap();
+    png(&own.join("q.png"), 99);
+    let before = std::fs::read(own.join("q.png")).unwrap();
+    let q = s.execute("library.import", &json!({"paths": [own.join("q.png").to_string_lossy()]})).unwrap()["imported"][0].as_u64().unwrap();
+    s.execute("library.select", &json!({"ids": [q]})).unwrap();
+    let c2 = s.execute("publish.createCollection", &json!({"service": "Disk", "name": "Own", "addSelected": true})).unwrap()["collection"]
+        .as_u64()
+        .unwrap();
+    let r = s.execute("publish.run", &json!({"collection": c2})).unwrap();
+    let failed = r["runs"][0]["failed"].as_array().cloned().unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{r}");
+    assert!(failed[0]["error"].as_str().unwrap_or_default().contains("original"), "{r}");
+    assert_eq!(std::fs::read(own.join("q.png")).unwrap(), before);
+    assert_eq!(files(&own), vec!["q.png"], "no sidecar created for the original");
 }
 
 /// Issue #1375: a publish looks at the library's originals once, not once per photo (each look walks the whole

@@ -70,7 +70,7 @@ impl PublishService for SftpPublish {
         if let Some(prev) = up.previous.filter(|p| *p != rel) {
             sftp::remove(&self.server, self.auth.clone(), &[prev.to_string()]).map_err(PublishError::Io)?;
         }
-        Ok(Published { remote_id: rel })
+        Ok(Published::new(rel))
     }
 
     fn remove(&mut self, remote_id: &str) -> Result<(), PublishError> {

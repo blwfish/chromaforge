@@ -16,6 +16,10 @@ pub struct CollectionConfig {
     /// The collection's folder (Hard Drive) or remote name, fixed when it was created: renaming the
     /// album doesn't move what was published.
     pub folder: String,
+    /// Hard Drive: per published file, the sidecars written with it. Only these are removed with
+    /// it: a file that merely shares its stem (an original's own `.xmp`) is not this collection's.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sidecars: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// One publish service.

@@ -85,7 +85,7 @@ fn config_round_trips_and_damage_is_an_error() {
         settings: json!({"dir": "/tmp"}),
         export: json!({"format": "jpeg"}),
         set: Some(AlbumId(1)),
-        collections: vec![CollectionConfig { album: AlbumId(2), folder: "Web".into() }],
+        collections: vec![CollectionConfig { album: AlbumId(2), folder: "Web".into(), sidecars: Default::default() }],
     });
     c.save(&d).unwrap();
     let back = PublishConfig::load(&d).unwrap();
@@ -98,7 +98,7 @@ fn config_round_trips_and_damage_is_an_error() {
 }
 
 fn svc(dir: &std::path::Path) -> (ServiceConfig, CollectionConfig) {
-    let coll = CollectionConfig { album: AlbumId(2), folder: "Web".into() };
+    let coll = CollectionConfig { album: AlbumId(2), folder: "Web".into(), sidecars: Default::default() };
     let s = ServiceConfig {
         id: "svc-1".into(),
         kind: KIND_HARD_DRIVE.into(),
@@ -132,6 +132,51 @@ fn hard_drive_writes_replaces_and_removes() {
     hd.remove("b.jpg").unwrap();
 }
 
+/// #1635: a removal takes only the files the collection recorded writing, through the trash, and never one the
+/// originals guard protects; a write the guard refuses fails and writes nothing.
+#[test]
+fn hard_drive_removes_only_its_recorded_files_through_the_trash_and_guard() {
+    use std::sync::{Arc, Mutex};
+    let d = tmp("hd-own");
+    let (s, mut coll) = svc(&d);
+    let web = d.join("Web");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("a.xmp"), b"theirs").unwrap(); // someone else's sidecar, named like ours
+    std::fs::write(web.join("b.jpg"), b"published").unwrap();
+    std::fs::write(web.join("b.xmp"), b"ours").unwrap();
+    std::fs::write(web.join("orig.jpg"), b"an original").unwrap();
+    std::fs::write(web.join("other.xmp"), b"not b's").unwrap(); // a bad record names it below
+    coll.sidecars.insert("b.jpg".into(), vec!["b.xmp".into(), "../escape.xmp".into(), "other.xmp".into()]);
+    let binned = Arc::new(Mutex::new(Vec::<String>::new()));
+    let bin = binned.clone();
+    let mut hd = HardDrive::open(&s, &coll)
+        .unwrap()
+        .with_guard(Arc::new(|p: &std::path::Path| {
+            if p.file_name().is_some_and(|n| n == "orig.jpg" || n == "orig.xmp") { Err("the original of orig.jpg".into()) } else { Ok(()) }
+        }))
+        .with_trash(Arc::new(move |p: &std::path::Path| {
+            bin.lock().unwrap().push(p.file_name().unwrap().to_string_lossy().to_string());
+            std::fs::remove_file(p).map_err(|e| e.to_string())
+        }));
+    std::fs::write(web.join("a.jpg"), b"published").unwrap();
+    hd.remove("a.jpg").unwrap();
+    assert_eq!(std::fs::read(web.join("a.xmp")).unwrap(), b"theirs", "no record: the stem's .xmp is not the collection's");
+    hd.remove("b.jpg").unwrap();
+    assert_eq!(*binned.lock().unwrap(), vec!["a.jpg", "b.xmp", "b.jpg"], "recorded files only (a bad record is ignored), to the trash");
+    assert_eq!(std::fs::read(web.join("other.xmp")).unwrap(), b"not b's", "a record naming another file's sidecar is ignored");
+    // a file the guard protects is never removed, and the removal still succeeds
+    hd.remove("orig.jpg").unwrap();
+    assert_eq!(std::fs::read(web.join("orig.jpg")).unwrap(), b"an original");
+    // nor written over, nor given a sidecar
+    let side = [("xmp", b"<x/>".to_vec())];
+    let up = Upload { photo: PhotoId(1), file_name: "orig.jpg", bytes: b"an original", sidecars: &side, previous: None };
+    assert!(hd.publish(&up).unwrap_err().to_string().contains("original"));
+    assert!(!web.join("orig.xmp").exists());
+    // what it writes is recorded for the next removal
+    let up = Upload { photo: PhotoId(2), file_name: "c.jpg", bytes: b"c", sidecars: &side, previous: None };
+    assert_eq!(hd.publish(&up).unwrap().sidecars, vec!["c.xmp".to_string()]);
+}
+
 #[test]
 fn hard_drive_never_leaves_its_folder() {
     let d = tmp("escape");
@@ -147,7 +192,7 @@ fn hard_drive_never_leaves_its_folder() {
     assert!(hd.folder().join(".._x.jpg").exists());
     assert_eq!(safe_name(" .. "), None);
     assert_eq!(safe_name("a/b"), Some("a_b".into()));
-    let bad = CollectionConfig { album: AlbumId(2), folder: "..".into() };
+    let bad = CollectionConfig { album: AlbumId(2), folder: "..".into(), sidecars: Default::default() };
     assert!(HardDrive::open(&s, &bad).is_err());
     let (mut nodir, _) = svc(&d);
     nodir.settings = json!({});

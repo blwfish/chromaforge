@@ -250,7 +250,7 @@ fn create_collection(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.commit("New Published Collection", Op::Batch { ops })?;
     if let Some(x) = cfg.service_mut(&id) {
-        x.collections.push(CollectionConfig { album, folder });
+        x.collections.push(CollectionConfig { album, folder, sidecars: Default::default() });
     }
     save(&dir, &cfg, C)?;
     status_json(s, &cfg, album)
@@ -363,7 +363,8 @@ pub struct Plan {
 pub struct Outcome {
     pub service: String,
     pub album: AlbumId,
-    pub published: Vec<(PhotoId, String, String)>,
+    /// (photo, remote id, fingerprint, files written beside it).
+    pub published: Vec<(PhotoId, String, String, Vec<String>)>,
     pub removed: Vec<PhotoId>,
     pub failed: Vec<(PhotoId, String)>,
     pub cancelled: bool,
@@ -394,11 +395,36 @@ pub fn plan(s: &mut Session, album: AlbumId) -> Result<Plan> {
     }
     let removals = st.to_remove.iter().filter_map(|id| link(&s.catalog, *id).map(|l| (*id, l.remote_id))).collect();
     let photos: Vec<PhotoId> = jobs.iter().map(|j: &Job| j.photo).collect();
-    let open = match plugin_opener(s, &svc, &coll, &photos).map_or_else(|| sftp::opener(s, &svc, &coll).map_err(|e| bad(C, e)), |o| Ok(Some(o)))? {
+    let open = match hard_drive_opener(s, &svc, &coll, &guard) {
         Some(o) => Some(o),
-        None => super::immich::publish::opener(s, &svc, &coll, &photos).map_err(|e| bad(C, e))?,
+        None => match plugin_opener(s, &svc, &coll, &photos).map_or_else(|| sftp::opener(s, &svc, &coll).map_err(|e| bad(C, e)), |o| Ok(Some(o)))? {
+            Some(o) => Some(o),
+            None => super::immich::publish::opener(s, &svc, &coll, &photos).map_err(|e| bad(C, e))?,
+        },
     };
     Ok(Plan { service: svc, collection: coll, jobs, removals, failed, open })
+}
+
+/// Opens a Hard Drive collection with what only the session has: the library's originals (no
+/// write or removal touches one) and the system trash (removed files go there). `None` for other kinds.
+fn hard_drive_opener(
+    s: &Session,
+    svc: &ServiceConfig,
+    coll: &CollectionConfig,
+    guard: &std::sync::Arc<crate::originals::OriginalGuard>,
+) -> Option<super::immich::publish::Opener> {
+    if svc.kind != lcc_publish::KIND_HARD_DRIVE {
+        return None;
+    }
+    let (svc, coll, guard, trash) = (svc.clone(), coll.clone(), guard.clone(), s.trash.clone());
+    Some(Box::new(move || {
+        let mut hd =
+            lcc_publish::hard_drive::HardDrive::open(&svc, &coll)?.with_guard(std::sync::Arc::new(move |p: &std::path::Path| guard.check(p)));
+        if let Some(trash) = trash {
+            hd = hd.with_trash(trash);
+        }
+        Ok(Box::new(hd) as Box<dyn lcc_publish::PublishService>)
+    }))
 }
 
 impl Plan {
@@ -466,7 +492,7 @@ impl Plan {
                     svc.publish(&up).map_err(|e| e.to_string())
                 });
                 match r {
-                    Ok(p) => out.published.push((photo, p.remote_id, fingerprint)),
+                    Ok(p) => out.published.push((photo, p.remote_id, fingerprint, p.sidecars)),
                     Err(e) => out.failed.push((photo, e)),
                 }
                 done += 1;
@@ -498,8 +524,9 @@ fn render_batch(batch: Vec<crate::export::PreparedExport>) -> Vec<std::result::R
 pub fn apply(s: &mut Session, out: Outcome) -> Result<Value> {
     let acct = lcc_publish::account_id(&out.service, out.album);
     let now = lcc_catalog::rules::now();
+    let warnings = record_sidecars(s, &out, &acct);
     let mut ops = Vec::new();
-    for (photo, remote_id, fp) in &out.published {
+    for (photo, remote_id, fp, _) in &out.published {
         if s.catalog.photo(*photo).is_none() {
             continue;
         }
@@ -518,7 +545,7 @@ pub fn apply(s: &mut Session, out: Outcome) -> Result<Value> {
     if let Ok((_, cfg)) = load(s, "publish.run")
         && let Some(svc) = cfg.service(&out.service)
     {
-        let sent: Vec<(PhotoId, String)> = out.published.iter().map(|(p, r, _)| (*p, r.clone())).collect();
+        let sent: Vec<(PhotoId, String)> = out.published.iter().map(|(p, r, _, _)| (*p, r.clone())).collect();
         ops.extend(super::immich::publish::original_link_ops(s, svc, &sent));
     }
     for photo in &out.removed {
@@ -527,13 +554,56 @@ pub fn apply(s: &mut Session, out: Outcome) -> Result<Value> {
     if !ops.is_empty() {
         s.apply_system(Op::Batch { ops })?;
     }
-    Ok(json!({
+    let mut r = json!({
         "collection": out.album.0,
-        "published": out.published.iter().map(|(p, r, _)| json!({"id": p.0, "remoteId": r})).collect::<Vec<_>>(),
+        "published": out.published.iter().map(|(p, r, _, _)| json!({"id": p.0, "remoteId": r})).collect::<Vec<_>>(),
         "removed": out.removed.iter().map(|p| p.0).collect::<Vec<_>>(),
         "failed": out.failed.iter().map(|(p, e)| json!({"id": p.0, "error": e})).collect::<Vec<_>>(),
         "cancelled": out.cancelled,
-    }))
+    });
+    if !warnings.is_empty() {
+        r["warnings"] = json!(warnings);
+    }
+    Ok(r)
+}
+
+/// Keep the collection's record of the sidecars written with each published file (Hard Drive:
+/// only recorded files are ever removed with a photo, #1635), from a run's outcome, before its
+/// links change: a re-publish under a new name and a removal drop the old file's entry. Returns
+/// warnings: a record that can't be saved only means a later removal leaves those sidecars behind.
+fn record_sidecars(s: &Session, out: &Outcome, acct: &str) -> Vec<String> {
+    const C: &str = "publish.run";
+    let Ok((dir, mut cfg)) = load(s, C) else { return Vec::new() };
+    let Some(coll) = cfg.services.iter_mut().find(|x| x.id == out.service).and_then(|x| x.collections.iter_mut().find(|c| c.album == out.album))
+    else {
+        return Vec::new();
+    };
+    let before = coll.sidecars.clone();
+    let link = |id: PhotoId| s.catalog.remote_links().get(&(id, lcc_publish::SERVICE.to_string(), acct.to_string())).map(|l| l.remote_id.clone());
+    for photo in &out.removed {
+        if let Some(old) = link(*photo) {
+            coll.sidecars.remove(&old);
+        }
+    }
+    for (photo, remote_id, _, sidecars) in &out.published {
+        if let Some(old) = link(*photo).filter(|old| old != remote_id) {
+            coll.sidecars.remove(&old);
+        }
+        if sidecars.is_empty() {
+            coll.sidecars.remove(remote_id);
+        } else {
+            coll.sidecars.insert(remote_id.clone(), sidecars.clone());
+        }
+    }
+    if coll.sidecars == before {
+        return Vec::new();
+    }
+    match cfg.save(&dir) {
+        Ok(()) => Vec::new(),
+        Err(e) => vec![format!(
+            "couldn't record the files written beside the published photos ({e}); removing those photos later leaves those files in place"
+        )],
+    }
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {

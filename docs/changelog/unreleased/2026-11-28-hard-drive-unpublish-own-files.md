@@ -1,0 +1,3 @@
+## Import, export and formats
+
+- **Hard Drive publish removes only its own files, to the trash:** removing a photo from a Hard Drive published collection deleted the published file and, for good, any `{stem}.xmp` beside it, whether the collection wrote it or not (a catalogued original's own sidecar in the same folder, for one). The collection now records in `publish.json` the sidecars it writes, removes only the published file and those, moves them to the system trash (deletes them where there is none: web, Android), and checks the originals guard before every write and removal, so a published name or sidecar never replaces or creates an original's file. A collection published before this keeps its old `.xmp` files on removal (#1635).
