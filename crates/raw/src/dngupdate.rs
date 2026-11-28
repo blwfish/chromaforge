@@ -7,7 +7,8 @@
 //! the space of what it replaces is big enough: the old IFD0, the old XMP packet and `SubIFDs` list,
 //! and a preview a previous update of this app made. What does not fit there is **appended** after the
 //! end of the file, and the header (for IFD0) or the entry that names it then points at the new copy;
-//! the space it leaves is unreferenced. So a second update with a preview and packet no bigger than
+//! the space it leaves is unreferenced and zeroed, so no copy of what was replaced (a location the
+//! user cleared) stays in the file's bytes. So a second update with a preview and packet no bigger than
 //! the first leaves the file the same length, and a first update grows it by what it adds. A write
 //! in place never touches a range anything else in the file references (every directory, strip,
 //! tile and out-of-line value is listed and checked before and after); should the result not read
@@ -399,6 +400,20 @@ fn directory_slot(file: &[u8], l: Layout, offset: u64) -> Option<Span> {
     Some((start, start.checked_add(l.directory_len(n))?))
 }
 
+/// The bytes of a preview of ours: its directory, its strips and its out-of-line values.
+fn own_spans(file: &[u8], ifd: &Ifd, l: Layout) -> Vec<Span> {
+    let mut out: Vec<Span> = directory_slot(file, l, ifd.offset).into_iter().collect();
+    out.extend(ifd.entries.iter().filter_map(|e| value_slot(ifd, e.tag, l)));
+    if let (Some(o), Some(c)) = (ifd.u64s(t::STRIP_OFFSETS), ifd.u64s(t::STRIP_BYTE_COUNTS)) {
+        for (o, c) in o.into_iter().zip(c) {
+            if let (Ok(s), Ok(n)) = (usize::try_from(o), usize::try_from(c)) {
+                out.push((s, s.saturating_add(n)));
+            }
+        }
+    }
+    out
+}
+
 /// Every byte range the update must leave alone: the header, every directory but IFD0, every out-of-line
 /// value but IFD0's `XMP` and `SubIFDs`, every strip, tile and JPEG thumbnail. A preview of ours that
 /// is being replaced is not in it. The in-place writes never touch these; the result is checked against
@@ -468,6 +483,20 @@ struct Out {
 }
 
 impl Out {
+    /// Zero each of `spans` that lies within the original and overlaps nothing in `protected` (what the file still
+    /// references, and what this update wrote in place).
+    fn clear(&mut self, spans: &[Span]) {
+        for &(s, e) in spans {
+            let keep = self.protected.iter().any(|p| overlaps(*p, (s, e)));
+            if s < e
+                && e <= self.original
+                && !keep
+                && let Some(b) = self.bytes.get_mut(s..e)
+            {
+                b.fill(0);
+            }
+        }
+    }
     fn align(&mut self) {
         if self.bytes.len() % 2 == 1 {
             self.bytes.push(0);
@@ -639,6 +668,7 @@ fn build(file: &[u8], jpeg: &[u8], frame: &JpegFrame, xmp: &[u8], tiff: &Tiff, h
     } else {
         none
     };
+    let old_list = list_slot;
     let list_slot = if reuse { list_slot } else { None };
     let (name_slot, version_slot) = old_names.unwrap_or((None, None));
 
@@ -701,6 +731,18 @@ fn build(file: &[u8], jpeg: &[u8], frame: &JpegFrame, xmp: &[u8], tiff: &Tiff, h
     l.put_offset(&mut header_offset, ifd0_at)?;
     let at = l.header_offset_at();
     out.bytes.get_mut(at..at + l.offset_len()).ok_or_else(|| RawError::Corrupt("the header is cut short".into()))?.copy_from_slice(&header_offset);
+
+    // What this update replaced and didn't write over is cleared, so the file keeps no copy of it: a location or
+    // a keyword the user removed must not stay in its bytes, unreferenced (the old IFD0, its XMP packet and SubIFDs
+    // list, every preview of ours). Never a byte the file still references, nor one this update wrote.
+    let mut superseded: Vec<Span> = Vec::new();
+    superseded.extend(l.directory_count(file, head.ifd0).and_then(|n| head.ifd0.checked_add(l.directory_len(n)).map(|end| (head.ifd0, end))));
+    superseded.extend(value_slot(first, t::XMP, l));
+    superseded.extend(old_list);
+    for p in &ours {
+        superseded.extend(own_spans(file, p, l));
+    }
+    out.clear(&superseded);
 
     // the result must read back the way it was built, and nothing the file still references moved
     let untouched = untouched(&guarded, file, &out.bytes);
@@ -1128,5 +1170,63 @@ mod tests {
         assert!(!untouched(&[(8, 12)], &file, &out), "a span running past the original");
         out[3] = b'x';
         assert!(!untouched(&[(0, 10)], &file, &out));
+    }
+
+    fn contains(hay: &[u8], needle: &[u8]) -> bool {
+        hay.windows(needle.len()).any(|w| w == needle)
+    }
+
+    const GPS_PACKET: &[u8] = br#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:exif="http://ns.adobe.com/exif/1.0/" exif:GPSLatitude="51,30.1234N" exif:GPSLongitude="0,7.5678W"/></rdf:RDF></x:xmpmeta>"#;
+
+    /// A cleared location (or a removed private keyword): the new packet doesn't name it but is longer than the
+    /// old one, so it is appended. The old packet, IFD0 and SubIFDs list it replaces are cleared, so no copy of what
+    /// was removed stays in the file's bytes; nothing the file still uses is touched.
+    #[test]
+    fn an_update_leaves_no_copy_of_what_it_replaced() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let original = write_dng(
+                &raw(),
+                &DngWriteOptions {
+                    compression: DngCompression::Uncompressed,
+                    order,
+                    xmp: Some(String::from_utf8(GPS_PACKET.to_vec()).unwrap()),
+                    ..Default::default()
+                },
+            )
+            .expect("writes");
+            assert!(contains(&original, b"51,30.1234N"), "fixture carries the location");
+            let mut fresh = String::from(
+                r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:subject><rdf:Bag>"#,
+            );
+            for i in 0..20 {
+                fresh.push_str(&format!("<rdf:li>keyword {i}</rdf:li>"));
+            }
+            fresh.push_str("</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>");
+            let done = update(&original, &jpeg(32, 24), fresh.as_bytes()).expect("updates");
+            assert!(done.appended_bytes > 0, "fixture: the packet is appended");
+            let tiff = Tiff::parse(&done.bytes).expect("parses");
+            assert_eq!(tiff.ifds[0].bytes(t::XMP), Some(fresh.as_bytes()));
+            assert!(!contains(&done.bytes, b"51,30.1234N"), "{order:?}: the cleared position is still in the file's bytes");
+            assert_eq!(pixels(&done.bytes), pixels(&original), "{order:?}: the raw is untouched");
+        }
+    }
+
+    /// A second update whose preview no longer fits where the first one's was: the old preview, its directory and
+    /// its values are cleared, not left in the file unreferenced.
+    #[test]
+    fn a_replaced_preview_that_doesnt_fit_is_cleared() {
+        let original = dng(ByteOrder::Little);
+        let small = jpeg(16, 12);
+        let once = update(&original, &small, XMP).expect("first").bytes;
+        assert!(contains(&once, &small));
+        let big = jpeg(64, 48);
+        let twice = update(&once, &big, XMP).expect("second");
+        assert_eq!(twice.replaced_previews, 1);
+        assert!(twice.appended_bytes > 0, "fixture: the new preview is appended");
+        assert!(!contains(&twice.bytes, &small), "the replaced preview is still in the file");
+        assert_eq!(pixels(&twice.bytes), pixels(&original));
+        // and a third, as a reader that follows the file would see it
+        let thrice = update(&twice.bytes, &jpeg(16, 12), XMP).expect("third");
+        assert_eq!(pixels(&thrice.bytes), pixels(&original));
     }
 }
