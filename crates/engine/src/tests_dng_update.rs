@@ -122,3 +122,52 @@ fn a_dng_whose_new_file_reads_back_different_is_left_as_it_was() {
     assert_eq!(ok["updated"].as_array().map(Vec::len), Some(1), "{ok}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A virtual copy shares its master's file; its edits live only in the catalog. Updating it must not write the
+/// copy's XMP and render into the master's original (every other writer of files refuses virtual copies): the copy
+/// is skipped with the reason, and with only copies selected the command is not available.
+#[test]
+fn a_virtual_copy_never_writes_into_its_masters_dng() {
+    let (mut s, dir, file) = with_dng("dng-update-copy", &synthetic_dng_with(None, lcc_meta::Metadata::default()));
+    let master = s.catalog.photos().next().unwrap().id;
+    s.execute("photo.virtualCopy", &json!({"ids": [master.0]})).unwrap();
+    let copy = s.catalog.photos().find(|p| p.copy_of == Some(master)).expect("a virtual copy").id;
+    s.execute("photo.rate", &json!({"ids": [copy.0], "rating": 5})).unwrap();
+    let before = std::fs::read(&file).unwrap();
+    // named: refused, the file untouched
+    let e = s.execute("photo.updateDngPreview", &json!({"ids": [copy.0]})).unwrap_err().to_string();
+    assert!(e.contains("virtual copy"), "{e}");
+    assert_eq!(std::fs::read(&file).unwrap(), before, "the master's DNG is left byte for byte");
+    // selected: the menu item is not available
+    s.selection.ids = vec![copy];
+    s.selection.active = Some(copy);
+    let e = s.execute("photo.updateDngPreview", &json!({})).unwrap_err();
+    assert!(matches!(e, crate::EngineError::Disabled(..)), "{e:?}");
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+
+    // master and copy together: the master's own edit is written, once; the copy is skipped
+    s.execute("photo.rate", &json!({"ids": [master.0], "rating": 2})).unwrap();
+    let r = s.execute("photo.updateDngPreview", &json!({"ids": [master.0, copy.0]})).unwrap();
+    let ids = |k: &str| r[k].as_array().unwrap().iter().map(|v| v["id"].as_u64().unwrap()).collect::<Vec<_>>();
+    assert_eq!((ids("updated"), ids("skipped"), ids("failed")), (vec![master.0], vec![copy.0], vec![]), "{r}");
+    assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("virtual copy"), "{r}");
+    let xmp = xmp_of(&std::fs::read(&file).unwrap());
+    assert!(xmp.contains("Rating=\"2\"") || xmp.contains("<xmp:Rating>2<"), "the master's rating: {xmp}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Two catalog records of one file (whatever made them) rewrite it once: the first named; the other is skipped.
+#[test]
+fn one_file_is_updated_once_however_many_photos_name_it() {
+    let (mut s, dir, _file) = with_dng("dng-update-same-file", &synthetic_dng_with(None, lcc_meta::Metadata::default()));
+    let first = s.catalog.photos().next().unwrap().id;
+    let mut twin = (**s.catalog.photo(first).unwrap()).clone();
+    twin.id = s.catalog.alloc_photo_id();
+    let second = twin.id;
+    s.catalog.apply(lcc_catalog::Op::AddPhoto { photo: Box::new(twin) }).unwrap();
+    let r = s.execute("photo.updateDngPreview", &json!({"ids": [first.0, second.0]})).unwrap();
+    assert_eq!(r["updated"].as_array().map(Vec::len), Some(1), "{r}");
+    assert_eq!(r["skipped"][0]["id"].as_u64(), Some(second.0), "{r}");
+    assert!(r["skipped"][0]["reason"].as_str().unwrap().contains("same file"), "{r}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

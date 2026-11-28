@@ -627,8 +627,16 @@ fn render_to_dng(s: &mut Session, p: &Value) -> Result<Value> {
 /// Enabled when a selected photo is a DNG file (asked every frame: only the selection is looked at).
 fn has_dng_selection(s: &Session) -> std::result::Result<(), String> {
     let ids = if s.selection.ids.is_empty() { s.selection.active.iter().copied().collect::<Vec<_>>() } else { s.selection.ids.clone() };
-    let any = ids.iter().filter_map(|id| s.catalog.photo(*id)).any(|p| matches!(&p.source, Source::File { path } if crate::dng_update::is_dng(path)));
-    if any { Ok(()) } else { Err("no DNG selected".into()) }
+    let dngs =
+        || ids.iter().filter_map(|id| s.catalog.photo(*id)).filter(|p| matches!(&p.source, Source::File { path } if crate::dng_update::is_dng(path)));
+    // (a virtual copy's file is its master's: the update would write the copy's edits into it)
+    if dngs().any(|p| p.copy_of.is_none()) {
+        Ok(())
+    } else if dngs().next().is_some() {
+        Err("a virtual copy's file is its master's: select the master".into())
+    } else {
+        Err("no DNG selected".into())
+    }
 }
 
 /// Metadata ▸ Update DNG Preview & Metadata: see [`crate::dng_update`]. Here all in one go; the

@@ -117,21 +117,38 @@ pub fn prepare(s: &mut Session, p: &Value) -> Result<UpdateJob> {
     // sRGB, no metadata of its own: the preview is pixels, the metadata is the XMP packet
     let opts = ExportOptions::from_json(&json!({"format": "jpeg", "quality": quality, "longEdge": edge, "colorSpace": "srgb", "metadata": "none"}));
     let mut items = Vec::with_capacity(ids.len());
+    // each file is rewritten once, for the first photo that names it
+    let mut seen: std::collections::HashMap<String, PhotoId> = std::collections::HashMap::new();
     for id in ids {
         let ph = s.catalog.photo(id).ok_or_else(|| bad(format!("no photo {}", id.0)))?;
         let name = ph.file_name.clone();
+        let skip = |why: String| Item { id, name: name.clone(), path: String::new(), export: None, xmp: String::new(), skipped: Some(why) };
+        // a virtual copy's edits live only in the catalog: its file is the master's, which must not get the copy's
+        // metadata and render (every other writer of files refuses copies too)
+        if ph.copy_of.is_some() {
+            items.push(skip("it is a virtual copy: its file is its master's (update the master instead)".into()));
+            continue;
+        }
         let path = match &ph.source {
             Source::File { path } if is_dng(path) => path.clone(),
             _ => {
-                items.push(Item { id, name, path: String::new(), export: None, xmp: String::new(), skipped: Some("it is not a DNG file".into()) });
+                items.push(skip("it is not a DNG file".into()));
                 continue;
             }
         };
+        if let Some(first) = seen.get(&path) {
+            items.push(skip(format!("it is the same file as photo {}, which is updated", first.0)));
+            continue;
+        }
+        seen.insert(path.clone(), id);
         let xmp = crate::sidecar::sidecar_packet(ph, &s.catalog);
         let export = crate::export::prepare_export(s, id, &opts, 1).map_err(bad)?;
         items.push(Item { id, name, path, export: Some(export), xmp, skipped: None });
     }
     if items.iter().all(|i| i.skipped.is_some()) {
+        if items.iter().all(|i| s.catalog.photo(i.id).is_some_and(|p| p.copy_of.is_some())) {
+            return Err(bad("a virtual copy's file is its master's: update the master instead"));
+        }
         return Err(bad("none of the selected photos is a DNG file"));
     }
     Ok(UpdateJob { items })
