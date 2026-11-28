@@ -15,7 +15,8 @@ impl Session {
     }
 
     /// `app.export` params with a named `preset` expanded: the preset's params, overridden by the
-    /// call's own (`preset` itself removed). Unknown preset names are an error.
+    /// call's own (`preset` itself removed; a `null` keeps the preset's value). Unknown preset
+    /// names are an error.
     pub fn export_params(&self, p: &Value) -> std::result::Result<Value, String> {
         self.export_params_or(p, crate::export::ExportFormat::default())
     }
@@ -33,10 +34,13 @@ impl Session {
         let mut out = crate::export::ExportOptions::known_keys(&preset.params);
         if let (Some(o), Some(own)) = (out.as_object_mut(), p.as_object()) {
             // a single-file export (`path`) says where itself
-            if own.contains_key("path") {
+            if own.get("path").is_some_and(|v| !v.is_null()) {
                 o.remove("dir");
             }
-            for (k, v) in own.iter().filter(|(k, _)| *k != "preset") {
+            // `null` is "not given" (as `from_params` reads it), so it keeps the preset's value:
+            // a caller filling every field with `null` must not reset a preset's Remove Location
+            // or Metadata choice to the default
+            for (k, v) in own.iter().filter(|(k, v)| *k != "preset" && !v.is_null()) {
                 o.insert(k.clone(), v.clone());
             }
         }

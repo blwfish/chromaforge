@@ -146,6 +146,50 @@ fn a_preset_depth_is_judged_against_the_format_written() {
     }
 }
 
+/// FX-139: a caller that fills every field (a script, an agent) and passes `null` for a key the
+/// preset sets keeps the preset's value. Before, `null` was copied over the preset and then read
+/// as "not given", so the default replaced the preset's privacy settings: Remove Location off and
+/// Metadata All, and the GPS position and city went out.
+#[test]
+fn a_null_in_the_call_keeps_the_presets_setting() {
+    let dir = temp_dir("null-keeps-preset");
+    let src = dir.join("IMG_1.jpg");
+    std::fs::write(&src, jpeg_with_xmp(&lcc_meta::Metadata::default())).unwrap();
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [src.to_string_lossy()]})).unwrap();
+    let id = s.catalog.photos().next().unwrap().id;
+    let mut meta = s.catalog.photo(id).unwrap().meta.clone();
+    meta.gps = Some((48.85, 2.35));
+    meta.city = "NullParis".into();
+    meta.caption = "NullCaption".into();
+    s.catalog.apply(lcc_catalog::Op::SetMeta { id, meta: Box::new(meta) }).unwrap();
+    let out = dir.join("out");
+    s.execute(
+        "export.savePreset",
+        &json!({"name": "Private", "params": {"format": "jpeg", "removeLocation": true, "metadata": "copyright", "dir": out.to_string_lossy()}}),
+    )
+    .unwrap();
+
+    let p = s.export_params(&json!({"preset": "Private", "removeLocation": null, "metadata": null, "path": null, "quality": null})).unwrap();
+    assert_eq!(p["dir"].as_str(), Some(&*out.to_string_lossy()), "`path: null` names no file, so the preset's folder stays");
+    let o = ExportOptions::from_params(&p).unwrap();
+    assert!(o.remove_location, "removeLocation: null keeps the preset's `true`");
+    assert_eq!(o.metadata, crate::export::MetadataPolicy::Copyright, "metadata: null keeps the preset's choice");
+    let e = export_photo(&mut s, id, &o, 1).unwrap();
+    let back = lcc_meta::extract(&e.bytes);
+    assert_eq!((back.gps, back.city, back.caption), (None, None, None), "the private preset's export carries no location or caption");
+
+    // a value the call passes itself still overrides the preset
+    let p = s.export_params(&json!({"preset": "Private", "removeLocation": false, "metadata": "all"})).unwrap();
+    let o = ExportOptions::from_params(&p).unwrap();
+    assert_eq!((o.remove_location, o.metadata), (false, crate::export::MetadataPolicy::All));
+    let back = lcc_meta::extract(&export_photo(&mut s, id, &o, 1).unwrap().bytes);
+    assert!(back.gps.is_some() && back.city.as_deref() == Some("NullParis"), "the caller's own choice");
+    // and without a preset the call's params are passed on as they are (validation reads `null` as not given)
+    let p = s.export_params(&json!({"removeLocation": null})).unwrap();
+    assert_eq!(p, json!({"removeLocation": null}));
+}
+
 #[test]
 fn presets_conflicts_and_subfolders() {
     {
