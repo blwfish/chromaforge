@@ -13,7 +13,8 @@
 //!   either the old or the complete new content is there — never a truncated mix. The content
 //!   goes to a new temp file in the same folder (unique name, `create_new`), is synced to disk and
 //!   renamed over the target; then the folder is synced (POSIX). Any failure removes the temp
-//!   file and leaves the target as it was.
+//!   file and leaves the target as it was. The new file keeps the replaced one's permission bits
+//!   (Unix); see `keep_mode` for what it doesn't keep.
 //! - [`write_atomic_nosync`] is the same temp file + rename without the two syncs, for
 //!   recreatable outputs only: a failed write still removes the temp file and leaves the target as
 //!   it was, but after a power cut the new file may be lost (on some file systems left empty) —
@@ -290,7 +291,7 @@ fn replace_with(path: &Path, sync: bool, fill: &mut dyn FnMut(&mut dyn Write) ->
     let real = replace_target(path)?;
     let path = real.as_path();
     let (tmp, n) = write_temp(path, sync.then_some(&NoProgress as &dyn WriteProgress), fill)?;
-    if let Err(e) = fs::rename(&tmp, path) {
+    if let Err(e) = keep_mode(&tmp, path).and_then(|()| fs::rename(&tmp, path)) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
@@ -318,7 +319,7 @@ pub fn replace_verified_if(path: &Path, data: &[u8], unchanged: &mut dyn FnMut(&
     let real = replace_target(path)?;
     let path = real.as_path();
     let (tmp, _) = write_temp(path, Some(&NoProgress), &mut |w| w.write_all(data))?;
-    let checked = match same_content(&tmp, data, &NoProgress) {
+    let checked = match keep_mode(&tmp, path).and_then(|()| same_content(&tmp, data, &NoProgress)) {
         Ok(true) => match unchanged(path) {
             Ok(true) => fs::rename(&tmp, path),
             Ok(false) => Err(io::Error::other("it changed while the new file was being made, so it was left as it is now; try again")),
@@ -335,6 +336,31 @@ pub fn replace_verified_if(path: &Path, data: &[u8], unchanged: &mut dyn FnMut(&
         return Err(e);
     }
     sync_dir(parent_of(path));
+    Ok(())
+}
+
+/// Give the temp file `tmp` that is about to replace `path` the permission bits `path` has (Unix): a file the user
+/// made private or read-only stays so. Only the permission bits (`0o777`): set-user-ID, set-group-ID and sticky are
+/// not carried to a file that may belong to whoever replaced it. Nothing to do when `path` doesn't exist (it is
+/// created with the usual mode) and on other systems (Windows refuses to replace a read-only file).
+///
+/// Not kept (yet): extended attributes (macOS Finder tags), ACLs, the owner (only an administrator could set it),
+/// the creation date; and a hard link to the old file keeps the old content, since the new file is renamed over
+/// the name (writing in place would keep the link but lose the all-or-nothing replace).
+fn keep_mode(tmp: &Path, path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let old = match fs::metadata(path) {
+            Ok(m) => m.permissions().mode() & 0o777,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e),
+        };
+        fs::set_permissions(tmp, fs::Permissions::from_mode(old))
+            .map_err(|e| io::Error::new(e.kind(), format!("can't give the new file the permissions of {} ({e})", path.display())))?;
+    }
+    #[cfg(not(unix))]
+    let _ = (tmp, path);
     Ok(())
 }
 
@@ -1161,5 +1187,83 @@ mod read_back_tests {
             assert!(replace_verified(&link, b"x").is_err());
             assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is kept");
         }
+    }
+}
+
+/// A replaced file keeps its permission bits (Unix): a sidecar or original the user made private (0600) or
+/// read-only (0444) stays so after a save or an Update DNG. What is not kept, by design or for now, is pinned here.
+#[cfg(test)]
+#[cfg(unix)]
+mod mode_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    fn mode(p: &Path) -> u32 {
+        fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    fn file(d: &lcc_testkit::TempDir, mode: u32) -> PathBuf {
+        let p = d.path().join("IMG_1.xmp");
+        fs::write(&p, b"old").unwrap();
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_replaced_file_keeps_its_permission_bits() {
+        let d = lcc_testkit::TempDir::new("safe-file-mode");
+        for m in [0o600, 0o640, 0o644, 0o664, 0o444, 0o400] {
+            let p = file(&d, m);
+            write_atomic(&p, b"new").unwrap();
+            assert_eq!((fs::read(&p).unwrap(), mode(&p)), (b"new".to_vec(), m), "write_atomic, {m:o}");
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(m)).unwrap();
+            replace_verified(&p, b"newer").unwrap();
+            assert_eq!(mode(&p), m, "replace_verified, {m:o}");
+            write_atomic_nosync(&p, b"newest").unwrap();
+            assert_eq!(mode(&p), m, "write_atomic_nosync, {m:o}");
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o600)).unwrap();
+            fs::remove_file(&p).unwrap();
+        }
+    }
+
+    /// Only the permission bits: set-user-ID, set-group-ID and sticky are not carried to the new file (it may
+    /// belong to whoever replaced it).
+    #[test]
+    fn the_special_bits_are_not_carried_over() {
+        let d = lcc_testkit::TempDir::new("safe-file-mode-special");
+        let p = file(&d, 0o644);
+        if fs::set_permissions(&p, fs::Permissions::from_mode(0o4755)).is_err() || mode(&p) != 0o4755 {
+            lcc_testkit::skip!(System, "can't set the set-user-ID bit here");
+        }
+        write_atomic(&p, b"new").unwrap();
+        assert_eq!(mode(&p), 0o755);
+    }
+
+    /// A file that is created (nothing to keep) gets the usual mode, whatever the folder holds.
+    #[test]
+    fn a_new_file_gets_the_usual_mode() {
+        let d = lcc_testkit::TempDir::new("safe-file-mode-new");
+        let _private = file(&d, 0o600);
+        let p = d.path().join("IMG_2.xmp");
+        write_atomic(&p, b"new").unwrap();
+        assert_ne!(mode(&p), 0o600, "not the mode of another file");
+    }
+
+    /// Pinned as it is: a replace is a new file renamed over the old one, so a hard link to the old one keeps the
+    /// old content (the name that was saved to gets the new one). Writing in place would keep the link but lose
+    /// the all-or-nothing replace.
+    #[test]
+    fn a_hard_link_keeps_the_old_content() {
+        let d = lcc_testkit::TempDir::new("safe-file-hard-link");
+        let p = file(&d, 0o644);
+        let link = d.path().join("link.xmp");
+        if fs::hard_link(&p, &link).is_err() {
+            lcc_testkit::skip!(System, "no hard links on this volume");
+        }
+        write_atomic(&p, b"new").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"new");
+        assert_eq!(fs::read(&link).unwrap(), b"old");
+        assert_ne!(fs::metadata(&p).unwrap().ino(), fs::metadata(&link).unwrap().ino());
     }
 }
