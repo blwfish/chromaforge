@@ -1923,6 +1923,8 @@ mod tests_album_order;
 #[cfg(test)]
 mod tests_background;
 #[cfg(test)]
+mod tests_backup_prune;
+#[cfg(test)]
 mod tests_custom_order;
 #[cfg(test)]
 mod tests_folder_index;
@@ -1962,6 +1964,8 @@ mod tests_sort_cache;
 mod tests_tally;
 #[cfg(test)]
 mod tests_torn_append;
+#[cfg(test)]
+mod tests_unreadable;
 #[cfg(test)]
 mod tests_upgrade_backup;
 #[cfg(test)]
