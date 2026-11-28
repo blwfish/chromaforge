@@ -106,10 +106,9 @@ pub(crate) fn embeds_location(bytes: &[u8]) -> Option<bool> {
                 Some(tiff) => crate::try_read_exif(tiff).map_or(true, |m| m.has_location()),
                 None => !item.is_empty(),
             },
-            Kind::Xmp => crate::parse_xmp(&String::from_utf8_lossy(&item)).map_or(true, |x| {
-                x.metadata.has_location()
-                    || x.properties.iter().any(|(k, v)| crate::is_location_property(k) && v.iter().any(|v| !v.trim().is_empty()))
-            }),
+            Kind::Xmp => {
+                crate::parse_xmp(&String::from_utf8_lossy(&item)).map_or(true, |x| x.metadata.has_location() || x.states(crate::is_location_property))
+            }
             Kind::EncodedXmp => true,
         };
         if located {

@@ -33,7 +33,7 @@ mod xmp_merge;
 
 pub use container::{Embedded, embedded, jpeg_segments, jpeg_segments_with_all_xmp, png_chunks, webp_chunks};
 pub use datetime::{DatePrecision, DateTime};
-pub use exif::{from_tiff, read_exif, strip_exif_header, try_read_exif, try_read_exif_with, write_exif};
+pub use exif::{exif_has_gps_coordinates, from_tiff, read_exif, strip_exif_header, try_read_exif, try_read_exif_with, write_exif};
 pub use focus::FocusPoint;
 pub use fuji::{FujiRecipe, FujiRow, read_recipe_file, recipe_from_bytes, recipe_from_exif};
 pub use gpx::{GpxError, Match, TrackPoint, Tracklog, parse_gpx};
@@ -564,6 +564,23 @@ pub const LOCATION_XMP_PROPERTIES: &[&str] = &[
     "Iptc4xmpExt:LocationShown",
 ];
 
+impl XmpData {
+    /// Whether this packet holds non-blank text in a property `is` picks ([`is_location_property`],
+    /// [`is_gps_property`]): flattened ([`XmpData::properties`]), or anywhere inside its structure
+    /// ([`XmpData::values`]), since a bag of structures such as the IPTC Extension's
+    /// `LocationCreated` flattens to an empty item.
+    pub fn states(&self, is: fn(&str) -> bool) -> bool {
+        fn text_in(v: &XmpValue) -> bool {
+            match v {
+                XmpValue::Text(t) => !t.trim().is_empty(),
+                XmpValue::Array(a) => a.iter().any(text_in),
+                XmpValue::Struct(m) => m.values().any(text_in),
+            }
+        }
+        self.properties.iter().any(|(k, v)| is(k) && v.iter().any(|v| !v.trim().is_empty())) || self.values.iter().any(|(k, v)| is(k) && text_in(v))
+    }
+}
+
 /// The XMP properties of a GPS position, part of [`LOCATION_XMP_PROPERTIES`]: what a position
 /// cleared in the library ([`Metadata::gps`] alone) means.
 pub const GPS_XMP_PROPERTIES: &[&str] =
@@ -764,7 +781,7 @@ mod tests {
             assert!(m.has_location(), "{field} is a location");
             // written to XMP, it is a location property there too
             let xmp = parse_xmp(&write_xmp(&m, None)).unwrap();
-            assert!(xmp.properties.iter().any(|(k, v)| is_location_property(k) && v.iter().any(|v| !v.trim().is_empty())), "{field}: {:?}", xmp.properties);
+            assert!(xmp.states(is_location_property), "{field}: {:?}", xmp.properties);
             m.title = Some("kept".into());
             m.clear_location();
             assert!(!m.has_location(), "{field} is cleared");
@@ -775,7 +792,10 @@ mod tests {
         // a bag of them, as an IPTC Extension writer stores LocationShown
         let shown = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:LocationShown><rdf:Bag><rdf:li rdf:parseType="Resource"><Iptc4xmpExt:City>Lyon</Iptc4xmpExt:City></rdf:li></rdf:Bag></Iptc4xmpExt:LocationShown></rdf:Description></rdf:RDF>"#;
         let xmp = parse_xmp(shown).unwrap();
-        assert!(xmp.properties.iter().any(|(k, v)| is_location_property(k) && v.iter().any(|v| v == "Lyon")), "{:?}", xmp.properties);
+        assert!(xmp.states(is_location_property), "{:?}", xmp.values);
+        assert!(!xmp.states(is_gps_property));
+        let empty = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:LocationShown><rdf:Bag><rdf:li rdf:parseType="Resource"><Iptc4xmpExt:City> </Iptc4xmpExt:City></rdf:li></rdf:Bag></Iptc4xmpExt:LocationShown></rdf:Description></rdf:RDF>"#;
+        assert!(!parse_xmp(empty).unwrap().states(is_location_property), "blank fields state nothing");
         assert!(!is_location_property("photoshop:CityX") && !is_location_property("dc:title"));
         assert!(GPS_XMP_PROPERTIES.iter().all(|k| LOCATION_XMP_PROPERTIES.contains(k) && is_gps_property(k)), "a position is a location");
         assert!(!is_gps_property("photoshop:City"));

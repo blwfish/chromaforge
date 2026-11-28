@@ -2304,14 +2304,13 @@ pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalo
 /// Recognized raw XMP location properties make an Original unsafe to copy even when malformed or held
 /// in an ordinary packet not projected into `Metadata` (port of upstream PR 3054). Every ordinary JPEG
 /// packet and the extended one are parsed; a packet or chunk stream that can't be fully inspected
-/// fails closed.
+/// fails closed. The Exif GPS IFD's coordinates count too, readable as a position or not.
 ///
 /// `is_location` picks the properties that count: [`lcc_meta::is_location_property`], or
 /// [`lcc_meta::is_gps_property`] for a position cleared in the library.
 fn original_embeds_xmp_location(bytes: &[u8], label: &str, is_location: fn(&str) -> bool) -> Result<bool, String> {
-    if bytes.starts_with(b"8BPS") {
-        return Ok(false);
-    }
+    // (a PSD's packet too: its metadata was already read strictly, but the raw properties a
+    // projection drops, such as a malformed position or an IPTC Extension location, only show here)
     let (embedded, ordinary_packets) = if bytes.starts_with(&[0xff, 0xd8]) {
         lcc_meta::jpeg_segments_with_all_xmp(bytes)
     } else {
@@ -2326,10 +2325,15 @@ fn original_embeds_xmp_location(bytes: &[u8], label: &str, is_location: fn(&str)
         if xmp.properties_truncated {
             return Err(format!("{label}: can't verify location metadata in this original file: embedded XMP property limit was exceeded"));
         }
-        found |= xmp.properties.iter().any(|(key, values)| is_location(key) && values.iter().any(|v| !v.trim().is_empty()));
+        found |= xmp.states(is_location);
     }
     if embedded.chunk_walk_incomplete {
         return Err(format!("{label}: can't verify location metadata in this original file: embedded PNG/WebP chunk stream is incomplete"));
+    }
+    // Exif GPS coordinates count as the `exif:GPS…` properties do, also when a missing hemisphere
+    // ref keeps them from reading as a position
+    if is_location("exif:GPSLatitude") && embedded.exif.as_deref().is_some_and(lcc_meta::exif_has_gps_coordinates) {
+        found = true;
     }
     Ok(found)
 }

@@ -972,7 +972,18 @@ fn remove_location_refuses_originals_that_embed_or_may_embed_a_location() {
     cases.push(("IimCity.jpg".into(), jpeg_with_iim_city("Lyon"), &["can't remove the location"]));
     let created = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:LocationCreated><rdf:Bag><rdf:li rdf:parseType="Resource"><Iptc4xmpExt:City>Lyon</Iptc4xmpExt:City></rdf:li></rdf:Bag></Iptc4xmpExt:LocationCreated></rdf:Description></rdf:RDF>"#;
     cases.push(("LocationCreated.jpg".into(), jpeg_with_raw_xmp(created), &["can't remove the location"]));
-    cases.push(("TwoPackets.jpg".into(), jpeg_with_xmp_packets(&[&lcc_meta::write_xmp(&lcc_meta::Metadata { city: Some("Lyon".into()), ..Default::default() }, None), &lcc_meta::write_xmp(&lcc_meta::Metadata::default(), None)]), &["can't remove the location"]));
+    // a PSD's raw XMP properties are scanned as a JPEG's are (review C17), and Exif GPS coordinates
+    // whose hemisphere refs are missing count though they read as no position (review C19)
+    cases.push(("LocationCreated.psd".into(), psd_with_raw_xmp(created), &["can't remove the location"]));
+    cases.push(("RefLessGps.jpg".into(), jpeg_with_refless_exif_gps(), &["can't remove the location"]));
+    cases.push((
+        "TwoPackets.jpg".into(),
+        jpeg_with_xmp_packets(&[
+            &lcc_meta::write_xmp(&lcc_meta::Metadata { city: Some("Lyon".into()), ..Default::default() }, None),
+            &lcc_meta::write_xmp(&lcc_meta::Metadata::default(), None),
+        ]),
+        &["can't remove the location"],
+    ));
 
     let mut paths = Vec::new();
     for (name, bytes, _) in &cases {
@@ -2088,6 +2099,27 @@ fn jpeg_with_iim_city(city: &str) -> Vec<u8> {
     out.extend(&jpeg[2..]);
     assert_eq!(lcc_meta::extract(&out).city.as_deref(), Some(city), "the fixture's IIM city is read");
     out
+}
+
+/// A JPEG whose Exif GPS IFD holds coordinates but no hemisphere refs: they read as no position
+/// (`Metadata::gps` is `None`), yet anyone can read them out of the file.
+fn jpeg_with_refless_exif_gps() -> Vec<u8> {
+    let m = lcc_meta::Metadata { gps: Some(lcc_meta::Gps { latitude: 45.0, longitude: 7.0, altitude: None }), ..Default::default() };
+    let mut exif = lcc_meta::write_exif(&m);
+    let le = exif.starts_with(b"II");
+    let u16b = |v: u16| if le { v.to_le_bytes() } else { v.to_be_bytes() };
+    // the GPSLatitudeRef (1) and GPSLongitudeRef (3) entries, ASCII (2), become unknown tags
+    for (tag, to) in [(1u16, 0x7ff1u16), (3, 0x7ff3)] {
+        let entry = [u16b(tag), u16b(2)].concat();
+        let at = exif.windows(4).position(|w| w == entry).expect("the ref's IFD entry");
+        exif[at..at + 2].copy_from_slice(&u16b(to));
+    }
+    assert!(lcc_meta::read_exif(&exif).gps.is_none(), "no position reads from it");
+    assert!(lcc_meta::exif_has_gps_coordinates(&exif), "the coordinates are there");
+    let pixels = [96u8; 12];
+    let image = lcc_codecs::EncodeImage::new(2, 2, 3, lcc_codecs::Samples::U8(&pixels));
+    let meta = lcc_codecs::EncodeMeta { exif: Some(&exif), ..Default::default() };
+    lcc_codecs::encode_jpeg(&image, 90, lcc_codecs::ChromaSubsampling::S444, &meta).unwrap()
 }
 
 /// A JPEG with one APP1 XMP segment per packet, in order.

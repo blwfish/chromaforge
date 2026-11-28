@@ -18,6 +18,15 @@ pub fn read_exif(bytes: &[u8]) -> Metadata {
     try_read_exif(bytes).unwrap_or_default()
 }
 
+/// Whether an Exif block (as [`read_exif`] takes it) has a GPS latitude or longitude, whether or not
+/// it reads as a position: [`Metadata::gps`] is left empty when a hemisphere ref is missing or not
+/// `N`/`S`/`E`/`W`, but the coordinates are still in the file. A block that can't be parsed says
+/// nothing here (Remove Location's check treats unreadable metadata on its own).
+pub fn exif_has_gps_coordinates(bytes: &[u8]) -> bool {
+    let Ok(tiff) = lcc_tiff::Tiff::parse(strip_exif_header(bytes)) else { return false };
+    tiff.gps().is_some_and(|g| g.value(t::GPS_LATITUDE).is_some() || g.value(t::GPS_LONGITUDE).is_some())
+}
+
 /// Like [`read_exif`] but reports a structurally invalid TIFF header / IFD0.
 pub fn try_read_exif(bytes: &[u8]) -> Result<Metadata, TiffError> {
     try_read_exif_with(bytes, &ParseOptions::default())
