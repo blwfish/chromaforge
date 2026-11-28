@@ -345,6 +345,14 @@ fn inspect(file: &[u8]) -> Result<(Tiff, Head)> {
             return Err(unsupported("it was written by Adobe software, which keeps its own preview and metadata consistent: update it there"));
         }
     }
+    // Everything the update appends goes after the end of the file: a strip, tile or value the file says runs past
+    // its end (a copy cut short, a wrong byte count) would then hold the new bytes, read as its own
+    if let Some(&(s, e)) = protected(file, &tiff, head.layout).iter().find(|&&(s, e)| e > file.len() || s > e) {
+        return Err(unsupported(format!(
+            "it says it holds data from byte {s} to {e}, past the end of the file ({} bytes): it may have been cut short",
+            file.len()
+        )));
+    }
     Ok((tiff, head))
 }
 
@@ -439,6 +447,13 @@ fn protected(file: &[u8], tiff: &Tiff, l: Layout) -> Vec<Span> {
         walk(file, ifd, l, i == 0, 0, &mut out);
     }
     out
+}
+
+/// Whether every span of `guarded` holds in `out` what it holds in `file`. A span `file` doesn't hold whole is
+/// never unchanged ([`inspect`] refuses such a file; clipping it to the file's length would excuse exactly the
+/// bytes an update appends there).
+fn untouched(guarded: &[Span], file: &[u8], out: &[u8]) -> bool {
+    guarded.iter().all(|&(s, e)| file.get(s..e).is_some_and(|f| out.get(s..e) == Some(f)))
 }
 
 /// The builder: the original file, rewritten in place where a freed slot is big enough, appended to
@@ -688,10 +703,7 @@ fn build(file: &[u8], jpeg: &[u8], frame: &JpegFrame, xmp: &[u8], tiff: &Tiff, h
     out.bytes.get_mut(at..at + l.offset_len()).ok_or_else(|| RawError::Corrupt("the header is cut short".into()))?.copy_from_slice(&header_offset);
 
     // the result must read back the way it was built, and nothing the file still references moved
-    let untouched = guarded.iter().all(|&(s, e)| {
-        let e = e.min(file.len());
-        s >= e || out.bytes.get(s..e) == file.get(s..e)
-    });
+    let untouched = untouched(&guarded, file, &out.bytes);
     let check = Tiff::parse(&out.bytes)?;
     let new_first = check.ifds.first().ok_or_else(|| RawError::Corrupt("the rewritten file has no image directory".into()))?;
     let ok = untouched
@@ -1053,5 +1065,68 @@ mod tests {
         }
         assert!(jpeg_frame(&[0xFF, 0xD8, 0xFF]).is_err());
         assert!(jpeg_frame(&[0xFF, 0xD8, 0xFF, 0xC0, 0xFF, 0xFF]).is_err());
+    }
+
+    /// The raw IFD's strip: where its byte count is stored, its start, and the file with that count set to `len`.
+    fn with_strip_len(file: &[u8], len: usize) -> Vec<u8> {
+        let tiff = Tiff::parse(file).expect("parses");
+        let raw_ifd = tiff
+            .all_ifds()
+            .into_iter()
+            .find(|i| i.u32(t::NEW_SUBFILE_TYPE).unwrap_or(0) == 0 && i.contains(t::STRIP_OFFSETS))
+            .expect("a raw IFD with strips");
+        let counts = raw_ifd.get(t::STRIP_BYTE_COUNTS).expect("counts");
+        assert_eq!((counts.count(), counts.field_type().size()), (1, 4), "fixture: one LONG byte count");
+        let at = usize::try_from(counts.offset).unwrap();
+        let mut out = file.to_vec();
+        out[at..at + 4].copy_from_slice(&(len as u32).to_le_bytes());
+        out
+    }
+
+    fn strip_start(file: &[u8]) -> usize {
+        let tiff = Tiff::parse(file).expect("parses");
+        let raw_ifd = tiff.all_ifds().into_iter().find(|i| i.u32(t::NEW_SUBFILE_TYPE).unwrap_or(0) == 0 && i.contains(t::STRIP_OFFSETS)).unwrap();
+        usize::try_from(raw_ifd.u64(t::STRIP_OFFSETS).unwrap()).unwrap()
+    }
+
+    /// A file cut short (an interrupted card or network copy) or with a wrong strip count claims raw data past its
+    /// end. The update appends at the end, so its new bytes would land inside what the strip claims (and read as
+    /// sensor data): such a file is refused, by `check` too. A strip that ends exactly at the end is fine.
+    #[test]
+    fn a_dng_whose_strip_runs_past_its_end_is_refused() {
+        let good = dng(ByteOrder::Little);
+        let start = strip_start(&good);
+        let to_end = good.len() - start;
+        for (claimed, refused) in [(to_end - 1, false), (to_end, false), (to_end + 1, true), (to_end + 4096, true)] {
+            let file = with_strip_len(&good, claimed);
+            assert!(Tiff::parse(&file).is_ok(), "fixture: still parses");
+            let r = update(&file, &jpeg(32, 24), XMP);
+            assert_eq!(
+                r.is_err(),
+                refused,
+                "a strip of {claimed} bytes ending {to_end} bytes into the file: {:?}",
+                r.as_ref().map(|d| d.appended_bytes)
+            );
+            assert_eq!(check(&file).is_err(), refused, "check agrees ({claimed})");
+            if refused {
+                let e = r.err().unwrap().to_string();
+                assert!(e.contains("past the end"), "{e}");
+            }
+        }
+    }
+
+    /// The read-back check compares every span the file still references with the original, and a span the
+    /// original doesn't hold whole is never "unchanged" (it used to be clipped to the original's length, which
+    /// excused exactly the bytes an update appends there).
+    #[test]
+    fn a_span_past_the_original_is_never_unchanged() {
+        let file = b"0123456789".to_vec();
+        let mut out = file.clone();
+        out.extend_from_slice(b"appended");
+        assert!(untouched(&[(0, 10)], &file, &out));
+        assert!(untouched(&[(4, 4)], &file, &out), "an empty span");
+        assert!(!untouched(&[(8, 12)], &file, &out), "a span running past the original");
+        out[3] = b'x';
+        assert!(!untouched(&[(0, 10)], &file, &out));
     }
 }
