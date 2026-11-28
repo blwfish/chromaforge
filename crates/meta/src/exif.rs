@@ -669,6 +669,32 @@ pub(crate) mod tests {
         TiffWriter::new(order, false).write(&[ifd0]).unwrap()
     }
 
+    /// Exif text written in Latin-1 (older cameras and software): a "©" in Copyright, Artist and Description is read
+    /// as "©", not turned into U+FFFD (which Update DNG would then write into the original's XMP as the rights).
+    #[test]
+    fn latin1_copyright_artist_and_description_are_read_as_written() {
+        for order in [ByteOrder::Little, ByteOrder::Big] {
+            let mut ifd0 = IfdBuilder::new();
+            ifd0.set(t::ARTIST, Value::Ascii("Ren# Dupont".into()));
+            ifd0.set(t::COPYRIGHT, Value::Ascii("# 2009 Ren# Dupont".into()));
+            ifd0.set(t::IMAGE_DESCRIPTION, Value::Ascii("Caf# au lait".into()));
+            let mut file = TiffWriter::new(order, false).write(&[ifd0]).unwrap();
+            // the same text as Latin-1 bytes: '#' stands for the byte the writer can't be given
+            for (at, byte) in [("Ren#", 0xe9u8), ("# 2009", 0xa9), ("Caf#", 0xe9)] {
+                let mut from = 0;
+                while let Some(i) = file[from..].windows(at.len()).position(|w| w == at.as_bytes()) {
+                    let hash = from + i + at.find('#').unwrap();
+                    file[hash] = byte;
+                    from = from + i + 1;
+                }
+            }
+            let m = read_exif(&file);
+            assert_eq!(m.artist.as_deref(), Some("Ren\u{e9} Dupont"), "{order:?}");
+            assert_eq!(m.copyright.as_deref(), Some("\u{a9} 2009 Ren\u{e9} Dupont"), "{order:?}");
+            assert_eq!(m.caption.as_deref(), Some("Caf\u{e9} au lait"), "{order:?}");
+        }
+    }
+
     #[test]
     fn reads_all_fields() {
         for order in [ByteOrder::Little, ByteOrder::Big] {

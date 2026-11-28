@@ -364,6 +364,20 @@ impl<'a> Ctx<'a> {
     }
 }
 
+/// The text of an ASCII value's bytes. TIFF ASCII is 7-bit by the spec, but files carry other text there: UTF-8 (most
+/// software now) or a single-byte legacy encoding (Latin-1, Windows-1252: "©" is 0xA9 in both, as older cameras
+/// and editors write it). Valid UTF-8 is read as UTF-8; every byte that isn't part of it is read as the Latin-1
+/// character it is, so nothing is replaced with U+FFFD and lost (which Update DNG then wrote into the original's
+/// XMP as the photo's rights or creator).
+fn ascii_text(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    for chunk in b.utf8_chunks() {
+        out.push_str(chunk.valid());
+        out.extend(chunk.invalid().iter().map(|&c| char::from(c)));
+    }
+    out
+}
+
 /// Decode `bytes` (exactly `count × size` long, or the first values of an entry) as values of type `typ`.
 pub fn decode(o: ByteOrder, typ: FieldType, b: &[u8]) -> Value {
     fn arr<const N: usize>(c: &[u8]) -> [u8; N] {
@@ -378,7 +392,7 @@ pub fn decode(o: ByteOrder, typ: FieldType, b: &[u8]) -> Value {
             // every NUL-separated string is kept (TIFF 6.0 allows several in one field); only the
             // terminating NULs go
             let end = b.iter().rposition(|&c| c != 0).map_or(0, |i| i.saturating_add(1));
-            Value::Ascii(String::from_utf8_lossy(b.get(..end).unwrap_or_default()).into_owned())
+            Value::Ascii(ascii_text(b.get(..end).unwrap_or_default()))
         }
         FieldType::SByte => Value::SByte(b.iter().map(|&x| x as i8).collect()),
         FieldType::Short => Value::Short(b.as_chunks::<2>().0.iter().map(|c| o.u16(arr(c))).collect()),
@@ -404,6 +418,26 @@ mod tests {
     use crate::Value;
     use crate::tags as t;
     use crate::writer::{IfdBuilder, TiffWriter};
+
+    /// TIFF ASCII is 7-bit by the spec, but files carry other text there. UTF-8 stays UTF-8; a byte that isn't
+    /// part of valid UTF-8 (Latin-1 or Windows-1252 text: "©" is 0xA9 in both) is read as the Latin-1 character
+    /// it is, never replaced with U+FFFD and dropped.
+    #[test]
+    fn ascii_text_that_is_not_utf8_is_read_as_latin1() {
+        let ascii = |b: &[u8]| match decode(ByteOrder::Little, FieldType::Ascii, b) {
+            Value::Ascii(s) => s,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(ascii(b"Jane Doe\0"), "Jane Doe");
+        assert_eq!(ascii(b"\xa9 Jane Doe\0"), "\u{a9} Jane Doe", "Latin-1");
+        assert_eq!(ascii("\u{a9} Jane Doe\0".as_bytes()), "\u{a9} Jane Doe", "UTF-8");
+        assert_eq!(ascii(b"Caf\xe9 \xab\xbb\xff\0"), "Caf\u{e9} \u{ab}\u{bb}\u{ff}");
+        assert_eq!(ascii(b"Caf\xc3\0"), "Caf\u{c3}", "UTF-8 cut short: the last byte kept");
+        assert_eq!(ascii(b"Gr\xc3\xbc\xc3\x9fe \xe9t\xc3\xa9"), "Gr\u{fc}\u{df}e \u{e9}t\u{e9}", "valid UTF-8 stays, the stray byte is Latin-1");
+        assert_eq!(ascii(b"one\0tw\xf6\0\0"), "one\0tw\u{f6}", "several strings");
+        assert_eq!(ascii(b"\0\0"), "");
+        assert_eq!(ascii(b""), "");
+    }
 
     /// A value budget the caller sets bounds what is decoded: an entry claiming more value bytes than
     /// the budget allows is dropped, entries that fit are read (the sparse header-read path, where the
