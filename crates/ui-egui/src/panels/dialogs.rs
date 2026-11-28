@@ -4096,7 +4096,8 @@ pub(crate) fn export_settings(app: &mut LccApp, ui: &mut egui::Ui, f: ExportForm
         }
     }
 
-    // ---- Image Sizing, Output Sharpening, Metadata, Watermarking: rendered formats only
+    // ---- Image Sizing, Output Sharpening, Watermarking: rendered formats only; Metadata: every
+    // format (an Original's sidecar and a DNG's XMP follow it too)
     let rendered = opts.format.is_rendered();
     if rendered {
         let size = if *full_size {
@@ -4142,7 +4143,9 @@ pub(crate) fn export_settings(app: &mut LccApp, ui: &mut egui::Ui, f: ExportForm
                 );
             }
         }
+    }
 
+    {
         const METADATA: [(M, &str); 5] = [
             (M::All, "All"),
             (M::AllExceptCamera, "No camera"),
@@ -4151,16 +4154,19 @@ pub(crate) fn export_settings(app: &mut LccApp, ui: &mut egui::Ui, f: ExportForm
             (M::None, "None"),
         ];
         let mut summary = label_of(&METADATA, opts.metadata);
-        if opts.remove_location && !matches!(opts.metadata, M::None | M::Copyright | M::CopyrightContact) {
+        let all = !matches!(opts.metadata, M::None | M::Copyright | M::CopyrightContact);
+        if all && opts.remove_location {
             summary = format!("{summary}, {}", crate::i18n::tr("Remove location info"));
         }
         if export_section(app, ui, "Metadata", "Metadata", &summary) {
             choices(ui, "Metadata", "exportMetadata", &METADATA, &mut opts.metadata);
-            if !matches!(opts.metadata, M::None | M::Copyright | M::CopyrightContact) {
+            if all {
                 crate::dialog_frame::checkbox(ui, &mut opts.remove_location, crate::i18n::tr("Remove location info"));
             }
         }
+    }
 
+    if rendered {
         let summary = match &opts.watermark {
             None => crate::i18n::tr("No watermark").to_string(),
             Some(wm) if !wm.image.is_empty() => crate::i18n::tr("Graphic").to_string(),

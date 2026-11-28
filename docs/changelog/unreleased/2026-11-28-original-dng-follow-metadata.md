@@ -1,0 +1,3 @@
+## Import, export and formats
+
+- **Original and DNG follow the Metadata choice:** an Original's `.xmp` sidecar and a raw DNG's embedded XMP were the library's full sidecar packet: every keyword (those marked "don't include on export" too), title, caption, creator contact, rating, label and plug-in fields, whatever the Metadata choice; the dialog hid the Metadata section for these formats. They now come from `sidecar::export_packet`: keywords through the export's keyword list, the copyright fields only under Copyright / Copyright & Contact, nothing but the edits under None. The Metadata section shows for every format.

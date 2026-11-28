@@ -2574,7 +2574,8 @@ pub(crate) fn prepare_guarded(
             camera: p.develop.profile.camera.clone(),
             path: path.clone(),
             read: session.media.file_bytes.clone(),
-            packet: crate::sidecar::sidecar_packet_with(p, &session.catalog, removes_location(p, &session.catalog, o)),
+            // the edits, and the metadata the export's choices let out (as a rendered file's, FX-137)
+            packet: crate::sidecar::export_packet(p, &session.catalog, o),
             dng,
             quality: o.quality,
             lossy_edge: o.resize.is_some().then(|| {

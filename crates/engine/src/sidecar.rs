@@ -807,14 +807,33 @@ pub fn sidecar_packet(p: &Photo, cat: &lcc_catalog::Catalog) -> String {
 /// [`sidecar_packet`], without any location (GPS, sublocation, city, state, country) when
 /// `remove_location` is set (an export with "Remove location info").
 pub fn sidecar_packet_with(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool) -> String {
-    packet(p, cat, remove_location, true)
+    packet(p, cat, remove_location, true, None)
 }
 
-/// [`sidecar_packet_with`]; the GPS position is left out unless `gps` is set.
-fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: bool) -> String {
+/// The packet an export writes beside an Original (its `.xmp`) or into a raw DNG: the photo's
+/// edits (develop settings, video trim, pixel filters) always, and its metadata as the export's
+/// choices say, as a rendered file gets it (FX-137): the Metadata choice (`o.metadata`), the
+/// keywords' "include on export" options ([`lcc_catalog::Catalog::export_keywords`]) and Remove
+/// Location. Under All the rest of a sidecar goes too (rating, label, flag, plug-in fields);
+/// under the copyright choices only those fields; under None none.
+pub fn export_packet(p: &Photo, cat: &lcc_catalog::Catalog, o: &crate::export::ExportOptions) -> String {
+    packet(p, cat, crate::export::removes_location(p, cat, o), true, Some(o))
+}
+
+/// [`sidecar_packet_with`]; the GPS position is left out unless `gps` is set. With `export`, the
+/// metadata follows that export's choices ([`export_packet`]).
+fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: bool, export: Option<&crate::export::ExportOptions>) -> String {
+    use crate::export::MetadataPolicy;
     let nz = |s: &str| (!s.trim().is_empty()).then(|| s.to_string());
-    // Names in `dc:subject`, paths in `lr:hierarchicalSubject` (`keywords::to_file`).
-    let keywords = lcc_catalog::keywords::to_file(&p.meta.keywords);
+    // Names in `dc:subject`, paths in `lr:hierarchicalSubject` (`keywords::to_file`); an export
+    // writes the keywords its options let out
+    let keywords = match export {
+        None => lcc_catalog::keywords::to_file(&p.meta.keywords),
+        Some(_) => {
+            let k = cat.export_keywords(&p.meta.keywords);
+            lcc_catalog::keywords::FileKeywords { flat: k.flat, hierarchical: k.hierarchical }
+        }
+    };
     let meta = lcc_meta::Metadata {
         software: Some(lcc_brand::DISPLAY_NAME.into()),
         title: nz(&p.meta.title),
@@ -851,6 +870,25 @@ fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: boo
         // the one definition of a location, shared with the rendered export and the Original check (FX-138)
         meta.clear_location();
     }
+    // an export's Metadata choice: what is left of the photo's own fields (the edits stay)
+    let policy = export.map_or(MetadataPolicy::All, |o| o.metadata);
+    let all = matches!(policy, MetadataPolicy::All | MetadataPolicy::AllExceptCamera);
+    if !all {
+        let software = meta.software.take();
+        meta = match policy {
+            MetadataPolicy::Copyright | MetadataPolicy::CopyrightContact => lcc_meta::Metadata {
+                copyright: meta.copyright.take(),
+                copyright_marked: meta.copyright_marked,
+                usage_terms: meta.usage_terms.take(),
+                copyright_url: meta.copyright_url.take(),
+                artist: meta.artist.take(),
+                contact: if policy == MetadataPolicy::CopyrightContact { std::mem::take(&mut meta.contact) } else { Default::default() },
+                ..Default::default()
+            },
+            _ => lcc_meta::Metadata::default(),
+        };
+        meta.software = software;
+    }
     // the pixel-filter stack goes in its own namespace, not in `lc:settings`
     let filters: Vec<lcc_meta::XmpPluginFilter> = p.develop.plugin_filters.iter().map(crate::cmd::plugin_filters::to_xmp).collect();
     // (a lens picked from the lens database goes with the settings as `optics.lens`, issue #307)
@@ -876,14 +914,18 @@ fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: boo
         Flag::Pick => "pick",
         Flag::Reject => "reject",
     };
-    let mut lc = vec![("settings", settings.as_str()), ("flag", flag)];
-    if !remove_location && !p.meta.location.trim().is_empty() {
+    let mut lc = vec![("settings", settings.as_str())];
+    if all {
+        lc.push(("flag", flag));
+    }
+    if all && !remove_location && !p.meta.location.trim().is_empty() {
         lc.push(("location", p.meta.location.as_str()));
     }
-    // plug-in custom metadata fields, under their own namespace
+    // plug-in custom metadata fields, under their own namespace (metadata: under All only)
     let fields: Vec<(String, String, String)> = p
         .plugin_fields
         .iter()
+        .filter(|_| all)
         .filter_map(|(k, v)| k.split_once('/').map(|(plugin, key)| (plugin.to_string(), key.to_string(), lcc_catalog::rules::plugin_value_text(v))))
         .collect();
     let fields: Vec<(&str, &str, &str)> = fields.iter().map(|(a, b, c)| (a.as_str(), b.as_str(), c.as_str())).collect();
@@ -1061,7 +1103,7 @@ pub(crate) struct Packets {
 
 impl Packets {
     pub(crate) fn of(p: &Photo, cat: &lcc_catalog::Catalog) -> Packets {
-        Packets { with_gps: packet(p, cat, false, true), without_gps: packet(p, cat, false, false) }
+        Packets { with_gps: packet(p, cat, false, true, None), without_gps: packet(p, cat, false, false, None) }
     }
 }
 

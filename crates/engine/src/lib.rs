@@ -2991,6 +2991,8 @@ mod tests_import_move;
 #[cfg(test)]
 mod tests_import_tab;
 #[cfg(test)]
+mod tests_keyword_export;
+#[cfg(test)]
 mod tests_keyword_list;
 #[cfg(test)]
 mod tests_lens_blur;
