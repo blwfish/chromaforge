@@ -366,6 +366,37 @@ fn library_add_from_a_worker_goes_through_the_session_thread() {
     assert!(f.s.catalog.stack_of(photo_of(&r)).is_some(), "stacked by the session");
 }
 
+/// FX-144: a relayed request (a `program.end` hook, a job) is answered only in the library its
+/// call started in. Photo ids are per library: after another library is opened, the same number
+/// names one of its photos, which the plug-in's metadata, crop or `library.add` must not reach.
+/// Before, the request was answered against whichever library was open by then.
+#[test]
+fn a_relayed_request_never_reaches_another_library() {
+    let root = temp_dir("relay-switch");
+    let mut s = Session::new().with_fs();
+    s.open_library(root.join("a"), true).unwrap();
+    let id = s.visible_cloned()[0];
+    let (mut from_a, rx) = crate::cmd::plugins::relay_host(&s);
+    s.open_library(root.join("b"), true).unwrap();
+    let title = |s: &Session| s.catalog.photo(id).map(|p| p.meta.title.clone());
+    let before = title(&s);
+    assert!(before.is_some(), "the same number names a photo of library B");
+    let params = json!({"ids": [id.0.to_string()], "title": "set by a plug-in call from A"});
+    let p = params.clone();
+    let worker = std::thread::spawn(move || from_a.set_metadata(&p));
+    rx.recv().unwrap().answer(&mut s);
+    let err = worker.join().unwrap().unwrap_err();
+    assert!(err.contains("has been closed"), "{err}");
+    assert_eq!(title(&s), before, "B's photo is untouched");
+    // a call started in the library open now is answered as before
+    let (mut from_b, rx) = crate::cmd::plugins::relay_host(&s);
+    let worker = std::thread::spawn(move || from_b.set_metadata(&params));
+    rx.recv().unwrap().answer(&mut s);
+    worker.join().unwrap().unwrap();
+    assert_eq!(title(&s).as_deref(), Some("set by a plug-in call from A"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A file reached through a link inside the photo's folder is added under the path the folder's
 /// own files have, so adding it again by that path finds the same photo.
 #[cfg(unix)]

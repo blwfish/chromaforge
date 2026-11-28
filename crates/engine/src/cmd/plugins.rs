@@ -1345,7 +1345,7 @@ pub fn before_import_hook(s: &Session, source: Value, attended: bool) -> Option<
     let host = {
         // the process-wide relay pair (a `program.end` hook's and a job's): its requests are
         // answered every frame; a session nobody answers for refuses them at once
-        let relay = RelayHost::new(super::plugin_programs::relay_sender(), s.desktop.clone());
+        let relay = RelayHost::new(super::plugin_programs::relay_sender(), s);
         if attended { relay.allowing_program_start() } else { relay }
     };
     Some(std::sync::Arc::new(BeforeImportHook { library, source, host: std::sync::Mutex::new(host) }))
@@ -1443,6 +1443,10 @@ pub struct HostRequest {
     method: Relayed,
     params: Value,
     reply: std::sync::mpsc::Sender<std::result::Result<Value, String>>,
+    /// The library the call came from ([`Session::library_generation`] when the host was made):
+    /// photo ids are per library, so a request is answered only while that library is open
+    /// (FX-144).
+    library: u64,
     /// Who got to the request first: the session's thread taking it (`TAKEN`) or a caller
     /// that gave up waiting (`ABANDONED`), so a request is never run after its caller was
     /// told it failed.
@@ -1524,6 +1528,12 @@ impl HostRequest {
         if self.state.compare_exchange(WAITING, TAKEN, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
+        if self.library != s.library_generation() {
+            // another library was opened since the plug-in's call began: the same numbers name
+            // other photos there, so nothing is read or written
+            let _ = self.reply.send(Err(LIBRARY_CLOSED.into()));
+            return;
+        }
         let mut host = SessionHost(s);
         let r = match &self.method {
             Relayed::Catalog(m) => host.catalog(m, &self.params),
@@ -1545,17 +1555,24 @@ impl HostRequest {
     }
 }
 
+/// Why a relayed request was refused after a library switch (FX-144).
+pub(super) const LIBRARY_CLOSED: &str =
+    "the library this plug-in call started in has been closed: nothing was read or changed in the library open now";
+
 /// Why a hook can't start a program: a run starts from a plug-in command, which the user chose.
 pub(super) const HOOK_NO_START: &str = "program.start is not available in hooks or export destinations; start the program from a command";
 
 /// What plug-ins running on a worker see of the catalog: each request goes to the session's thread
 /// (see [`relay_host`]) and waits for its answer. Programs are looked up through the session's
 /// desktop; none is started ([`HOOK_NO_START`]).
-pub struct RelayHost(std::sync::mpsc::Sender<HostRequest>, std::sync::Arc<dyn crate::desktop::Desktop>, bool);
+/// Its requests carry the library it was made for, and are refused once another is open.
+pub struct RelayHost(std::sync::mpsc::Sender<HostRequest>, std::sync::Arc<dyn crate::desktop::Desktop>, bool, u64);
 
 impl RelayHost {
-    pub(super) fn new(tx: std::sync::mpsc::Sender<HostRequest>, desktop: std::sync::Arc<dyn crate::desktop::Desktop>) -> RelayHost {
-        RelayHost(tx, desktop, false)
+    /// A host for calls of session `s` (its desktop, and the library it has open now) whose
+    /// requests go to `tx`.
+    pub(super) fn new(tx: std::sync::mpsc::Sender<HostRequest>, s: &Session) -> RelayHost {
+        RelayHost(tx, s.desktop.clone(), false, s.library_generation())
     }
 
     /// [`RelayHost`] where `program.start` is relayed to the session's thread (only a
@@ -1568,7 +1585,9 @@ impl RelayHost {
     fn ask(&self, method: Relayed, params: &Value) -> std::result::Result<Value, String> {
         let (reply, rx) = std::sync::mpsc::channel();
         let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(WAITING));
-        self.0.send(HostRequest { method, params: params.clone(), reply, state }).map_err(|_| "the catalog is closed".to_string())?;
+        self.0
+            .send(HostRequest { method, params: params.clone(), reply, library: self.3, state })
+            .map_err(|_| "the catalog is closed".to_string())?;
         rx.recv().map_err(|_| "the catalog is closed".to_string())?
     }
 
@@ -1592,7 +1611,7 @@ impl RelayHost {
         use std::sync::atomic::Ordering;
         let (reply, rx) = std::sync::mpsc::channel();
         let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(WAITING));
-        let request = HostRequest { method, params: params.clone(), reply, state: state.clone() };
+        let request = HostRequest { method, params: params.clone(), reply, library: self.3, state: state.clone() };
         self.0.send(request).map_err(|_| "the catalog is closed".to_string())?;
         match rx.recv_timeout(limit) {
             Ok(r) => r,
@@ -1652,7 +1671,7 @@ impl HostApi for RelayHost {
 /// session's thread to answer.
 pub fn relay_host(s: &Session) -> (RelayHost, std::sync::mpsc::Receiver<HostRequest>) {
     let (tx, rx) = std::sync::mpsc::channel();
-    (RelayHost::new(tx, s.desktop.clone()), rx)
+    (RelayHost::new(tx, s), rx)
 }
 
 /// [`SessionHost`] for hooks and export destinations: the same catalog and lookups, no starts

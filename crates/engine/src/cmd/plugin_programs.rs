@@ -156,7 +156,7 @@ pub(super) fn start(s: &mut Session, run: StartRequest) -> Result<(), String> {
     guard.detail("The results come back when {program} closes");
     guard.warn_on_stop("What {program} makes from now on won't come back to the catalog, and {program} keeps running.");
     let library = s.plugin_library.clone();
-    let host = HookHost(RelayHost::new(relay_sender(), s.desktop.clone()));
+    let host = HookHost(RelayHost::new(relay_sender(), s));
     let work = move || {
         let StartRequest { plugin, program, dir, reservation, .. } = run;
         let (status, code) = wait_for_end(child.as_mut(), &cancel);

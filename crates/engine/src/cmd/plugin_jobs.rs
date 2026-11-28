@@ -204,7 +204,7 @@ pub(super) fn run(s: &mut Session, mut call: PendingCall, wait: bool) -> Result<
         super::plugins::sync_fields(s);
         return r;
     }
-    let host = JobHost(RelayHost::new(relay_sender(), s.desktop.clone()));
+    let host = JobHost(RelayHost::new(relay_sender(), s));
     let started = json!({"job": id, "running": true, "plugin": names.0, "command": names.2});
     // the call and its row are moved in; a thread that can't start hands them back
     let (tx, rx) = std::sync::mpsc::channel::<(PendingCall, Row)>();

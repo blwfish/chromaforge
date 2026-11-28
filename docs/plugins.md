@@ -260,7 +260,9 @@ Plug-in Manager show which program it is, not how the plug-in will use it.
   reading (`status`: `exited`, `cancelled` or `failed`; `code`: the program's exit code, or null on
   macOS, where `open` starts it, after a cancel, and for a program ended by a signal). Its catalog
   reads and writes are answered on the UI thread, as for export hooks; a session with no UI
-  (headless MCP, the CLI) refuses them. `program.list` works there; `program.start` doesn't (start
+  (headless MCP, the CLI) refuses them. Once another library has been opened since the call began,
+  they are refused too ("the library this plug-in call started in has been closed"): photo ids are
+  per library. The same holds for jobs and export hooks. `program.list` works there; `program.start` doesn't (start
   programs from a command, where the user is).
 - **The activity stack** shows each run, named after the program and the plug-in ("Waiting for
   DxO PureRAW to finish (Edit in DxO PureRAW)", kind `pluginProgram`), with the detail "The results
