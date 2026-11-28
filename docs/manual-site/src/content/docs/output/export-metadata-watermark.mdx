@@ -11,7 +11,7 @@ import { Aside } from '@astrojs/starlight/components';
 
 ## Metadata
 - **All**, **No camera**, **Copyright**, **Copyright & Contact**, **None**.
-- Keywords marked not to be included on export (Keyword List ▸ Edit Keyword) are left out of every file an export writes, an Original's sidecar and a DNG included.
+- Keywords marked not to be included on export (Keyword List ▸ Edit Keyword) are left out of every file an export writes, an Original's sidecar and a DNG included, and of a web gallery's pages.
 - **Original** and **DNG**: the choice applies to the XMP the export writes (an Original's `.xmp` sidecar, the DNG's embedded XMP). The edits go with it under every choice; under **Copyright** only the copyright fields go, under **None** nothing else. An Original's own file is copied as it is, with whatever metadata it already holds.
 - **Remove location info** strips GPS and every place name: sublocation, city, state, country and country code. An original copied byte for byte is refused when it embeds any of them (in Exif, XMP, including the IPTC Extension's Location Created and Location Shown, or IPTC-IIM), or when its metadata cannot be fully checked (a cut-short PNG or WebP, an over-limit XMP packet), with JPEG or TIFF offered instead. A video clip's original is always refused under it: export the clip in another format, which writes a new movie.
 - An original is also refused, with or without **Remove location info**, when its own GPS position lies inside a private saved location (even if the library has since moved the photo elsewhere), or when the library's position was cleared and the file still holds one: a copy of the file would bring it back.

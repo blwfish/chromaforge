@@ -159,7 +159,9 @@ fn fields(s: &Session, id: PhotoId) -> BTreeMap<String, String> {
     put("lens", m.lens.clone());
     put("copyright", m.copyright.clone());
     put("creator", m.creator.clone());
-    put("keywords", m.keywords.join(", "));
+    // what an exported file lists: keywords marked "don't include on export" stay out of the page
+    // the gallery uploads (FX-141)
+    put("keywords", s.catalog.export_keywords(&m.keywords).flat.join(", "));
     put("rating", if p.rating > 0 { "★".repeat(usize::from(p.rating.min(5))) } else { String::new() });
     put("iso", m.iso.map(|i| format!("ISO {i}")).unwrap_or_default());
     put("aperture", m.aperture.filter(|a| a.is_finite()).map(|a| format!("f/{a:.1}")).unwrap_or_default());

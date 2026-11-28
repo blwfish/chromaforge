@@ -1,6 +1,6 @@
 //! What an export lets out of the library, for every kind of file it writes: an Original's
 //! sidecar and a raw DNG follow the Metadata choice and the keywords' "include on export" option
-//! as a rendered file does (FX-137).
+//! as a rendered file does (FX-137), and a web gallery's `{keywords}` token too (FX-141).
 
 use lcc_catalog::keywords::KeywordInfo;
 use lcc_catalog::{Op, PhotoId};
@@ -93,4 +93,19 @@ fn a_dng_export_follows_the_metadata_choice_and_keyword_flags() {
         !contains(&e.bytes, "secretkw") && contains(&e.bytes, "publickw") && contains(&e.bytes, "KwPrivateCaption"),
         "All, without the excluded keyword"
     );
+}
+
+/// FX-141: the web gallery's `{keywords}` token lists what an exported file would (the review's
+/// PoC `poc_web_gallery_keywords_token_follows_keyword_flags`).
+#[test]
+fn the_web_gallery_keywords_token_follows_the_keyword_flags() {
+    let dir = temp_dir("kw-web");
+    let mut s = Session::with_demo();
+    s.remote.connections_path = Some(dir.join("connections.json"));
+    let id = s.visible_cloned()[0];
+    private_metadata(&mut s, id);
+    let v = s.execute("web.preview", &json!({"ids": [id.0], "settings": {"imageInfo": {"title": "{keywords}", "caption": "{keywords}"}}})).unwrap();
+    let text = v["files"].to_string();
+    assert!(text.contains("publickw"), "sanity: the token is rendered");
+    assert!(!text.contains("secretkw"), "the page publishes a keyword marked not-for-export");
 }
