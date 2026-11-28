@@ -54,6 +54,7 @@ impl OriginalGuard {
     /// create a protected sidecar that isn't there yet.
     pub fn check(&self, target: &Path) -> Result<(), String> {
         if std::fs::symlink_metadata(target).is_err() {
+            unresolvable_dot_dot(target)?;
             return self.check_new(target); // nothing there to replace
         }
         let mut names: Vec<String> = target.file_name().map(|n| n.to_string_lossy().to_lowercase()).into_iter().collect();
@@ -155,6 +156,17 @@ fn is_xmp(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xmp"))
 }
 
+/// `Err` when `path` has a `..` in a folder part that cannot be resolved yet. `missing/../IMG_1.jpg`
+/// names an existing file once the writer creates `missing`, so while `missing` is not there the
+/// path cannot be checked against the originals: refuse it (upstream #4125, db4a4e2b5, for
+/// [`crate::Session::check_write_target`]; here for every [`OriginalGuard::check`] too, #1635).
+fn unresolvable_dot_dot(path: &Path) -> Result<(), String> {
+    if path.components().any(|c| c == std::path::Component::ParentDir) && std::fs::canonicalize(folder_of(path)).is_err() {
+        return Err(format!("{}: the folder part has `..` components that cannot be resolved; use a path without them", path.display()));
+    }
+    Ok(())
+}
+
 /// The folder `path` is in (`.` for a bare file name).
 fn folder_of(path: &Path) -> &Path {
     path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."))
@@ -172,11 +184,7 @@ impl crate::Session {
     pub fn check_write_target(&self, path: &str) -> Result<(), String> {
         let path = Path::new(path);
         if std::fs::symlink_metadata(path).is_err() {
-            // `missing/../IMG_1.jpg` names an existing file once the writer creates `missing`, so a `..` that cannot
-            // be resolved now cannot be checked: refuse it.
-            if path.components().any(|c| c == std::path::Component::ParentDir) && std::fs::canonicalize(folder_of(path)).is_err() {
-                return Err(format!("{}: the folder part has `..` components that cannot be resolved; use a path without them", path.display()));
-            }
+            unresolvable_dot_dot(path)?;
             if !is_xmp(path) {
                 return Ok(()); // nothing there to replace, and no sidecar to create
             }
@@ -370,6 +378,15 @@ mod tests {
         // Windows resolves `..` lexically and finds the original; Unix cannot resolve it and refuses
         assert!(error.contains("cannot be resolved") || error.contains("never writes over an original"), "{error}");
         assert!(s.check_write_target(&d.join("missing/new.jpg").to_string_lossy()).is_ok(), "a free name in a missing folder");
+        // #1635: the guard itself refuses it too, so every writer that checks it (exports, books, slideshows) does
+        let g = s.original_guard();
+        let error = g.check(&d.join("missing/../IMG_1.jpg")).unwrap_err();
+        assert!(error.contains("cannot be resolved") || error.contains("never writes over an original"), "{error}");
+        assert!(g.check(&d.join("missing/../IMG_1.xmp")).is_err(), "nor its sidecar");
+        assert!(g.check(&d.join("missing/new.jpg")).is_ok(), "a free name in a missing folder");
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        assert!(g.check(&d.join("sub/../new.jpg")).is_ok(), "a `..` that resolves, to a free name");
+        std::fs::remove_dir(d.join("sub")).unwrap();
         assert!(!d.join("missing").exists());
         let _ = std::fs::remove_dir_all(&d);
     }

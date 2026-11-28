@@ -538,6 +538,36 @@ fn export_never_overwrites_an_original() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// #1635: `<dir>/missing/../IMG_1.jpg` names the original once the writer creates `missing`, but while `missing` is
+/// not there the guard saw a free path and the rename replaced the original. Every way of reaching it (an exact
+/// path, or `dir` with `{name}`; Overwrite or Unique) leaves the original alone. Upstream db4a4e2b5 refused this
+/// for `check_write_target` only; the existing `..` tests above create `sub/` first, so they never caught it.
+#[test]
+fn a_dot_dot_through_a_missing_folder_never_replaces_an_original() {
+    use crate::export::{Conflict, Destination};
+    for (case, conflict) in [("exact", Conflict::Overwrite), ("exact", Conflict::Unique), ("dir", Conflict::Unique), ("dir", Conflict::Overwrite)] {
+        let (mut s, id, dir, src, original) = library_with_jpeg(&format!("export-dotdot-missing-{case}-{conflict:?}"));
+        let o = ExportOptions { naming: "{name}".into(), conflict, ..Default::default() };
+        let to = if case == "exact" {
+            Destination { dir: String::new(), exact: Some(dir.join("missing/../IMG_1.jpg").to_string_lossy().into()) }
+        } else {
+            Destination { dir: dir.join("missing/..").to_string_lossy().into(), exact: None }
+        };
+        let r = disk_batch(&mut s, id, &o, &to);
+        assert!(std::fs::read(&src).unwrap() == original, "{case} {conflict:?}: the original was replaced; result {r:?}");
+        // Unix can't resolve `missing/..` and refuses; Windows resolves `..` by name, so it finds the original or a free name
+        if cfg!(unix) {
+            let error = match &r {
+                Err(e) => e.clone(),
+                Ok(v) => v.first().and_then(|e| e["error"].as_str()).unwrap_or_default().to_string(),
+            };
+            assert!(error.contains("cannot be resolved"), "{case} {conflict:?}: {r:?}");
+            assert!(!dir.join("missing").exists(), "{case} {conflict:?}: nothing was written");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Issue #2965: an export that waited its turn is checked against the library as it is when it starts. A
 /// file catalogued at its destination while it waited is an original by then, and is not written over.
 #[test]
