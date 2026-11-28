@@ -160,7 +160,7 @@ fn a_failed_write_loses_nothing_once_a_snapshot_saves_it() {
     assert_eq!(j.durable_seq(), acked);
     assert_eq!(j.lost(), 1);
     assert!(j.wants_snapshot());
-    FAIL_WRITES.lock().unwrap().clear();
+    FAIL_WRITES.lock().unwrap().retain(|p| !p.starts_with(&d.0)); // (only its own: tests run side by side)
     // no append after a hole
     let more = rate(&mut c, id, 5);
     assert!(j.append(&more).is_err());
@@ -192,7 +192,7 @@ fn a_durable_snapshot_counts_the_queued_ops_even_when_the_log_reset_fails() {
     FAIL_WRITES.lock().unwrap().push(d.0.join(LOG));
     j.append(&rate(&mut c, id, 4)).unwrap(); // handed over, then lost
     assert!(j.flush().is_err());
-    FAIL_WRITES.lock().unwrap().clear();
+    FAIL_WRITES.lock().unwrap().retain(|p| !p.starts_with(&d.0));
     let queued = rate(&mut c, id, 5); // its append is refused (it would follow a hole)
     assert!(j.append(&queued).is_err());
     let before = j.seq() + j.lost();
@@ -201,7 +201,7 @@ fn a_durable_snapshot_counts_the_queued_ops_even_when_the_log_reset_fails() {
     assert!(e.to_string().contains("stopped answering"), "{e}");
     assert_eq!(j.seq(), before + queued.len() as u64, "the durable snapshot holds the lost and the queued ops");
     assert_eq!(j.lost(), 0);
-    FAIL_REPLACES.lock().unwrap().clear();
+    FAIL_REPLACES.lock().unwrap().retain(|p| !p.starts_with(&d.0));
     j.append(&rate(&mut c, id, 3)).unwrap();
     j.flush().unwrap();
     let seq = j.seq();
@@ -210,6 +210,53 @@ fn a_durable_snapshot_counts_the_queued_ops_even_when_the_log_reset_fails() {
     assert!(report.damaged.is_none(), "{report:?}");
     assert_eq!((j2.seq(), report.replayed), (seq, 1), "the old records are skipped, the later one replays once");
     assert_eq!(rating(&c2, id), 3);
+}
+
+/// A crash can cut the log right before a record's newline. The open writes that newline before anything is
+/// appended after the record; when the write fails, the open says so, as any failed log write at open does. (It
+/// used to hand the byte to the log's thread and count it as written: when that write failed, the next append was
+/// glued onto the last record, `…}{"seq":…`, and the next open dropped both.)
+#[test]
+fn a_log_cut_before_a_newline_is_mended_before_anything_is_appended() {
+    let d = Dir::new("newline");
+    let (seq, id) = {
+        let (mut j, mut c, _) = open(&d.0);
+        j.append(&add_photo(&mut c)).unwrap();
+        let id = c.photos().next().unwrap().id;
+        j.append(&rate(&mut c, id, 2)).unwrap();
+        j.flush().unwrap();
+        (j.seq(), id)
+    };
+    // a crash after the last record's bytes, before its newline
+    let path = d.0.join(LOG);
+    let mut log = std::fs::read(&path).unwrap();
+    assert_eq!(log.pop(), Some(b'\n'));
+    std::fs::write(&path, &log).unwrap();
+
+    FAIL_WRITES.lock().unwrap().push(path.clone());
+    let refused = Journal::open(Box::new(FsStore::open(&d.0).unwrap()));
+    if let Ok((mut j, mut c, _)) = refused {
+        // (what happened before: the failed newline went unnoticed, no change counted as lost, and the next record
+        // was glued to the last)
+        let _ = j.flush();
+        FAIL_WRITES.lock().unwrap().retain(|p| !p.starts_with(&d.0));
+        j.append(&rate(&mut c, id, 4)).unwrap();
+        j.flush().unwrap();
+        drop(j);
+        let (j2, c2, report) = open(&d.0);
+        panic!("the open went on without the newline: reopened at seq {} (rating {}, {report:?})", j2.seq(), rating(&c2, id));
+    }
+    FAIL_WRITES.lock().unwrap().retain(|p| !p.starts_with(&d.0));
+    assert_eq!(std::fs::read(&path).unwrap(), log, "the log is left as it was");
+    // once the disk takes writes again, the open mends it and nothing is lost
+    let (mut j, mut c, _) = open(&d.0);
+    assert_eq!((j.seq(), rating(&c, id)), (seq, 2));
+    j.append(&rate(&mut c, id, 4)).unwrap();
+    j.flush().unwrap();
+    drop(j);
+    let (j2, c2, report) = open(&d.0);
+    assert!(report.damaged.is_none() && report.torn_bytes == 0, "{report:?}");
+    assert_eq!((j2.seq(), rating(&c2, id)), (seq + 1, 4));
 }
 
 /// Closing without a flush (the app quitting) still writes and syncs everything handed over.

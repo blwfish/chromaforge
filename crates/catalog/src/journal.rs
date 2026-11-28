@@ -737,7 +737,18 @@ impl Journal {
                 j.store.truncate(LOG, good_end as u64).map_err(io)?;
                 j.log_bytes = good_end as u64;
             } else if needs_newline {
+                // Written and synced before anything is appended after the record, and checked: natively the log
+                // is written by a thread of its own, whose failed write would show only later, after this byte was
+                // counted as written. The next record would then be glued to this one (`…}{"seq":…`), and the
+                // next open would drop both.
                 j.store.append(LOG, b"\n").map_err(io)?;
+                j.store.flush(LOG).map_err(io)?;
+                if let Some(why) = j.store.log_progress(LOG).and_then(|p| p.failed) {
+                    return Err(CatalogError::Io(format!(
+                        "{LOG}: its last record can't be ended with a newline ({why}); nothing was changed. Check that \
+                         the drive has free space and can be written to, then open the library again"
+                    )));
+                }
                 j.log_bytes = good_end as u64 + 1;
             } else {
                 j.log_bytes = good_end as u64;

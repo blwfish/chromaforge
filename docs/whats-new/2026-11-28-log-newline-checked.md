@@ -1,0 +1,2 @@
+### Opening a library after a crash never drops saved changes
+- When a crash had cut the library's change log right at the end of a line, and the drive then failed to write the one missing character, the next changes could be stuck onto the last line and lost at the next open, with an acknowledged change before them. Opening now writes and checks that character first, and says so when the drive refuses it.
