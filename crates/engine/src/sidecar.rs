@@ -848,7 +848,8 @@ fn packet(p: &Photo, cat: &lcc_catalog::Catalog, remove_location: bool, gps: boo
     };
     let mut meta = meta;
     if remove_location {
-        (meta.sublocation, meta.city, meta.state, meta.country, meta.country_code, meta.gps) = (None, None, None, None, None, None);
+        // the one definition of a location, shared with the rendered export and the Original check (FX-138)
+        meta.clear_location();
     }
     // the pixel-filter stack goes in its own namespace, not in `lc:settings`
     let filters: Vec<lcc_meta::XmpPluginFilter> = p.develop.plugin_filters.iter().map(crate::cmd::plugin_filters::to_xmp).collect();

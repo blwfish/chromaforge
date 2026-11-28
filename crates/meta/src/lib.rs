@@ -268,6 +268,24 @@ macro_rules! overlay {
 
 impl Metadata {
     /// Fill every empty field of `self` from `other`.
+    /// The place names that make a location ([`Self::has_location`], [`Self::clear_location`]).
+    fn place_names(&self) -> [&Option<String>; 5] {
+        [&self.sublocation, &self.city, &self.state, &self.country, &self.country_code]
+    }
+
+    /// Whether this states where the photo was taken: GPS coordinates or any place name (the
+    /// sublocation, city, state, country or country code). What [`Self::clear_location`] removes.
+    pub fn has_location(&self) -> bool {
+        self.gps.is_some() || self.place_names().into_iter().flatten().any(|value| !value.trim().is_empty())
+    }
+
+    /// Remove the location: GPS coordinates and every place name [`Self::has_location`] looks at.
+    pub fn clear_location(&mut self) {
+        self.gps = None;
+        // (the fields of `place_names`; a test sets each one alone and clears it)
+        (self.sublocation, self.city, self.state, self.country, self.country_code) = (None, None, None, None, None);
+    }
+
     pub fn fill_missing(&mut self, other: &Metadata) {
         fill!(
             self,
@@ -311,6 +329,8 @@ impl Metadata {
             city,
             state,
             country,
+            // (with the other place names: a country code only in XMP or IPTC-IIM was dropped, FX-138)
+            country_code,
             rating,
             label
         );
@@ -519,16 +539,46 @@ fn extract_embedded(e: Embedded, mut m: Metadata, xmp: Option<XmpData>) -> Metad
 /// item, whichever image it describes (a thumbnail's too), and an item that can't be read counts
 /// as a location; for other files, what [`extract`] reads.
 pub fn embeds_location(bytes: &[u8]) -> bool {
-    heif::embeds_location(bytes).unwrap_or_else(|| has_location(&extract(bytes)))
+    heif::embeds_location(bytes).unwrap_or_else(|| extract(bytes).has_location())
 }
 
-/// Location includes the place names removed by export, as well as GPS coordinates.
-fn has_location(metadata: &Metadata) -> bool {
-    metadata.gps.is_some()
-        || [metadata.sublocation.as_deref(), metadata.city.as_deref(), metadata.state.as_deref(), metadata.country.as_deref()]
-            .into_iter()
-            .flatten()
-            .any(|value| !value.trim().is_empty())
+/// The XMP properties that say where a photo was taken: GPS coordinates and place names, the
+/// IPTC Core ones and the IPTC Extension's structures (`Iptc4xmpExt:LocationCreated`,
+/// `…:LocationShown`). With [`Metadata::has_location`] / [`Metadata::clear_location`], the one
+/// definition of "a location" that export's Remove Location uses for the files it writes and for
+/// the originals it copies.
+pub const LOCATION_XMP_PROPERTIES: &[&str] = &[
+    // GPS_XMP_PROPERTIES, repeated so this list is whole (a test checks it holds them)
+    "exif:GPSLatitude",
+    "exif:GPSLongitude",
+    "exif:GPSAltitude",
+    "exif:GPSDestLatitude",
+    "exif:GPSDestLongitude",
+    "exif:GPSAreaInformation",
+    "Iptc4xmpCore:Location",
+    "photoshop:City",
+    "photoshop:State",
+    "photoshop:Country",
+    "Iptc4xmpCore:CountryCode",
+    "Iptc4xmpExt:LocationCreated",
+    "Iptc4xmpExt:LocationShown",
+];
+
+/// The XMP properties of a GPS position, part of [`LOCATION_XMP_PROPERTIES`]: what a position
+/// cleared in the library ([`Metadata::gps`] alone) means.
+pub const GPS_XMP_PROPERTIES: &[&str] =
+    &["exif:GPSLatitude", "exif:GPSLongitude", "exif:GPSAltitude", "exif:GPSDestLatitude", "exif:GPSDestLongitude", "exif:GPSAreaInformation"];
+
+/// Whether the flattened XMP property `key` is part of a GPS position ([`GPS_XMP_PROPERTIES`]).
+pub fn is_gps_property(key: &str) -> bool {
+    GPS_XMP_PROPERTIES.contains(&key.split('/').next().unwrap_or(key))
+}
+
+/// Whether the flattened XMP property `key` ([`XmpData::properties`]) is a location: one of
+/// [`LOCATION_XMP_PROPERTIES`], or a field of one (`Iptc4xmpExt:LocationCreated/Iptc4xmpExt:City`).
+pub fn is_location_property(key: &str) -> bool {
+    let top = key.split('/').next().unwrap_or(key);
+    LOCATION_XMP_PROPERTIES.contains(&top)
 }
 
 /// Turn regions drawn on a photo as it is stored onto the upright photo. MWG gives each box as a fraction of
@@ -690,6 +740,45 @@ mod tests {
             assert_ne!(format_exposure_time(1.0 / n * (1.0 + outside)).as_deref(), Some(want.as_str()), "{n} +outside");
             assert_ne!(format_exposure_time(1.0 / n * (1.0 - outside)).as_deref(), Some(want.as_str()), "{n} -outside");
         }
+    }
+
+    /// FX-138: `has_location` and `clear_location` agree field by field (the country code too), and
+    /// the XMP property list covers the same fields as written, plus the IPTC Extension structures.
+    #[test]
+    fn has_location_and_clear_location_agree() {
+        let gps = Some(Gps { latitude: 1.0, longitude: 2.0, altitude: None });
+        let one = |f: &dyn Fn(&mut Metadata)| {
+            let mut m = Metadata::default();
+            f(&mut m);
+            m
+        };
+        let cases: [(&str, Metadata); 6] = [
+            ("gps", one(&|m| m.gps = gps)),
+            ("sublocation", one(&|m| m.sublocation = Some("x".into()))),
+            ("city", one(&|m| m.city = Some("x".into()))),
+            ("state", one(&|m| m.state = Some("x".into()))),
+            ("country", one(&|m| m.country = Some("x".into()))),
+            ("country code", one(&|m| m.country_code = Some("NZ".into()))),
+        ];
+        for (field, mut m) in cases {
+            assert!(m.has_location(), "{field} is a location");
+            // written to XMP, it is a location property there too
+            let xmp = parse_xmp(&write_xmp(&m, None)).unwrap();
+            assert!(xmp.properties.iter().any(|(k, v)| is_location_property(k) && v.iter().any(|v| !v.trim().is_empty())), "{field}: {:?}", xmp.properties);
+            m.title = Some("kept".into());
+            m.clear_location();
+            assert!(!m.has_location(), "{field} is cleared");
+            assert_eq!(m.title.as_deref(), Some("kept"), "nothing else is");
+        }
+        assert!(!one(&|m| m.city = Some(" \t".into())).has_location(), "a blank name is none");
+        assert!(is_location_property("Iptc4xmpExt:LocationCreated/Iptc4xmpExt:City"));
+        // a bag of them, as an IPTC Extension writer stores LocationShown
+        let shown = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:LocationShown><rdf:Bag><rdf:li rdf:parseType="Resource"><Iptc4xmpExt:City>Lyon</Iptc4xmpExt:City></rdf:li></rdf:Bag></Iptc4xmpExt:LocationShown></rdf:Description></rdf:RDF>"#;
+        let xmp = parse_xmp(shown).unwrap();
+        assert!(xmp.properties.iter().any(|(k, v)| is_location_property(k) && v.iter().any(|v| v == "Lyon")), "{:?}", xmp.properties);
+        assert!(!is_location_property("photoshop:CityX") && !is_location_property("dc:title"));
+        assert!(GPS_XMP_PROPERTIES.iter().all(|k| LOCATION_XMP_PROPERTIES.contains(k) && is_gps_property(k)), "a position is a location");
+        assert!(!is_gps_property("photoshop:City"));
     }
 
     #[test]

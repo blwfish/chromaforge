@@ -109,6 +109,13 @@ pub fn parse_iptc(b: &[u8]) -> Metadata {
             (2, 116) => m.copyright = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
             (2, 120) => m.caption = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
             (2, 122) => m.description_writer = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
+            // the place shown (IPTC Core maps these to `Iptc4xmpCore:Location`, `photoshop:City`, …): read so
+            // an export's Remove Location sees a place named only here
+            (2, 90) => m.city = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
+            (2, 92) => m.sublocation = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
+            (2, 95) => m.state = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
+            (2, 100) => m.country_code = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
+            (2, 101) => m.country = Some(decode(data, utf8)).filter(|s| !s.is_empty()),
             (2, 55) => date = Some(decode(data, utf8)),
             (2, 60) => time = Some(decode(data, utf8)),
             _ => {}
@@ -174,6 +181,30 @@ pub(crate) mod tests {
         assert_eq!(m.copyright.as_deref(), Some("CC0"));
         assert_eq!(m.caption.as_deref(), Some("A caption"));
         assert_eq!(m.capture_time.unwrap().to_iso(), "2021-03-04T10:11:12+01:00");
+    }
+
+    /// FX-138: the place datasets are read, so a place named only in IIM is a location.
+    #[test]
+    fn place_datasets_are_a_location() {
+        let mut iim = Vec::new();
+        ds(&mut iim, 2, 90, b"Lyon");
+        ds(&mut iim, 2, 92, b"Old Town");
+        ds(&mut iim, 2, 95, b"Rhone");
+        ds(&mut iim, 2, 100, b"FRA");
+        ds(&mut iim, 2, 101, b"France");
+        let m = parse_iptc(&iim);
+        assert_eq!(
+            (m.city.as_deref(), m.sublocation.as_deref(), m.state.as_deref(), m.country_code.as_deref(), m.country.as_deref()),
+            (Some("Lyon"), Some("Old Town"), Some("Rhone"), Some("FRA"), Some("France"))
+        );
+        for (dataset, value) in [(90u8, &b"Lyon"[..]), (92, b"Old Town"), (95, b"Rhone"), (100, b"FRA"), (101, b"France")] {
+            let mut one = Vec::new();
+            ds(&mut one, 2, dataset, value);
+            assert!(parse_iptc(&one).has_location(), "2:{dataset} alone is a location");
+        }
+        let mut blank = Vec::new();
+        ds(&mut blank, 2, 90, b"  ");
+        assert!(!parse_iptc(&blank).has_location(), "a blank city is none");
     }
 
     fn capture_time(time: Option<&[u8]>) -> Metadata {

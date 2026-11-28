@@ -962,6 +962,18 @@ fn remove_location_refuses_originals_that_embed_or_may_embed_a_location() {
     assert!(lcc_meta::extract(&bytes).gps.is_none(), "the malformed trailing resource reproduces the metadata gap");
     cases.push(("Resources.psd".into(), bytes, &["can't verify location metadata", "malformed PSD/PSB"]));
 
+    // FX-138: what counts as a location is one list (`lcc_meta::Metadata::has_location`,
+    // `lcc_meta::LOCATION_XMP_PROPERTIES`), so these count too: a country code alone, a place named
+    // only in IPTC-IIM, an IPTC Extension LocationCreated, and a location in a JPEG's first XMP
+    // packet when a later one has none (not "the last packet decides")
+    let code = jpeg_with_xmp(&lcc_meta::Metadata { country_code: Some("NZ".into()), ..Default::default() });
+    assert!(lcc_meta::try_extract(&code).unwrap().country_code.as_deref() == Some("NZ"), "the fixture carries a country code");
+    cases.push(("CountryCode.jpg".into(), code, &["can't remove the location"]));
+    cases.push(("IimCity.jpg".into(), jpeg_with_iim_city("Lyon"), &["can't remove the location"]));
+    let created = r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:Iptc4xmpExt="http://iptc.org/std/Iptc4xmpExt/2008-02-29/"><Iptc4xmpExt:LocationCreated><rdf:Bag><rdf:li rdf:parseType="Resource"><Iptc4xmpExt:City>Lyon</Iptc4xmpExt:City></rdf:li></rdf:Bag></Iptc4xmpExt:LocationCreated></rdf:Description></rdf:RDF>"#;
+    cases.push(("LocationCreated.jpg".into(), jpeg_with_raw_xmp(created), &["can't remove the location"]));
+    cases.push(("TwoPackets.jpg".into(), jpeg_with_xmp_packets(&[&lcc_meta::write_xmp(&lcc_meta::Metadata { city: Some("Lyon".into()), ..Default::default() }, None), &lcc_meta::write_xmp(&lcc_meta::Metadata::default(), None)]), &["can't remove the location"]));
+
     let mut paths = Vec::new();
     for (name, bytes, _) in &cases {
         let path = dir.join(name);
@@ -2052,4 +2064,63 @@ fn jpeg_with_extended_gps() -> Vec<u8> {
     out.extend(segment(e));
     out.extend(&jpeg[2..]);
     out
+}
+
+/// A JPEG whose only place name is the city in its IPTC-IIM block (APP13, resource 0x0404).
+fn jpeg_with_iim_city(city: &str) -> Vec<u8> {
+    let pixels = [96u8; 12];
+    let image = lcc_codecs::EncodeImage::new(2, 2, 3, lcc_codecs::Samples::U8(&pixels));
+    let jpeg = lcc_codecs::encode_jpeg(&image, 90, lcc_codecs::ChromaSubsampling::S444, &Default::default()).unwrap();
+    let mut iim = vec![0x1c, 2, 90];
+    iim.extend((city.len() as u16).to_be_bytes());
+    iim.extend(city.as_bytes());
+    let mut ps = b"Photoshop 3.0\0".to_vec();
+    ps.extend(b"8BIM\x04\x04\0\0");
+    ps.extend((iim.len() as u32).to_be_bytes());
+    ps.extend(&iim);
+    if iim.len() % 2 == 1 {
+        ps.push(0);
+    }
+    let mut out = jpeg[..2].to_vec();
+    out.extend([0xff, 0xed]);
+    out.extend(((ps.len() + 2) as u16).to_be_bytes());
+    out.extend(ps);
+    out.extend(&jpeg[2..]);
+    assert_eq!(lcc_meta::extract(&out).city.as_deref(), Some(city), "the fixture's IIM city is read");
+    out
+}
+
+/// A JPEG with one APP1 XMP segment per packet, in order.
+fn jpeg_with_xmp_packets(packets: &[&str]) -> Vec<u8> {
+    let pixels = [96u8; 12];
+    let image = lcc_codecs::EncodeImage::new(2, 2, 3, lcc_codecs::Samples::U8(&pixels));
+    let jpeg = lcc_codecs::encode_jpeg(&image, 90, lcc_codecs::ChromaSubsampling::S444, &Default::default()).unwrap();
+    let mut out = jpeg[..2].to_vec();
+    for p in packets {
+        let mut payload = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+        payload.extend(p.as_bytes());
+        out.extend([0xff, 0xe1]);
+        out.extend(((payload.len() + 2) as u16).to_be_bytes());
+        out.extend(payload);
+    }
+    out.extend(&jpeg[2..]);
+    out
+}
+
+/// FX-138: a video clip's original is never copied under Remove Location: its `©xyz` (or a
+/// Matroska tag, a camera's GPS track) can't be ruled out. Before, the clip went out as it was.
+#[test]
+fn remove_location_refuses_a_video_clips_original() {
+    let dir = temp_dir("export-noloc-video");
+    let clip = dir.join("clip.mp4");
+    lcc_video::test_util::write_clip(&clip, 64, 48, 10, |_| 120, &[("©xyz", "+48.8584+002.2945/")]);
+    let mut s = Session::new().with_fs();
+    s.execute("library.import", &json!({"paths": [clip.to_string_lossy()]})).unwrap();
+    let id = s.catalog.photos().next().unwrap().id;
+    let o = ExportOptions { format: ExportFormat::Original, remove_location: true, ..Default::default() };
+    let err = export_photo(&mut s, id, &o, 1).err().expect("refused");
+    assert!(err.contains("video clip") && err.contains("another format"), "{err}");
+    // without Remove Location it is copied as before
+    let e = export_photo(&mut s, id, &ExportOptions { format: ExportFormat::Original, ..Default::default() }, 1).unwrap();
+    assert!(e.bytes.windows(9).any(|w| w == b"+48.8584+"), "the copy is the file");
 }

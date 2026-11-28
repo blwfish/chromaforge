@@ -2264,14 +2264,11 @@ pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalo
     out.subject_code = m.subject_code.clone();
     out.alt_text = text(&m.alt_text);
     out.extended_description = text(&m.extended_description);
-    let remove_location = removes_location(photo, catalog, o);
-    if !remove_location {
-        out.sublocation = text(&m.location);
-        out.city = text(&m.city);
-        out.state = text(&m.state);
-        out.country = text(&m.country);
-        out.country_code = text(&m.country_code);
-    }
+    out.sublocation = text(&m.location);
+    out.city = text(&m.city);
+    out.state = text(&m.state);
+    out.country = text(&m.country);
+    out.country_code = text(&m.country_code);
     let keywords = catalog.export_keywords(&m.keywords);
     out.keywords = keywords.flat;
     out.hierarchical_keywords = keywords.hierarchical;
@@ -2279,8 +2276,10 @@ pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalo
     out.rating = (photo.rating > 0).then_some(photo.rating as i8);
     // Pixels are exported upright: orientation is baked in.
     out.orientation = Some(lcc_meta::Orientation::Normal);
-    if !remove_location {
-        out.gps = m.gps.map(|(latitude, longitude)| Gps { latitude, longitude, altitude: None });
+    out.gps = m.gps.map(|(latitude, longitude)| Gps { latitude, longitude, altitude: None });
+    if removes_location(photo, catalog, o) {
+        // the one definition of a location, shared with the sidecar and the Original check (FX-138)
+        out.clear_location();
     }
     if o.metadata == MetadataPolicy::All {
         // Make and Model as read (issue #1618); catalogs from before they were kept separately
@@ -2306,7 +2305,10 @@ pub fn export_metadata(photo: &lcc_catalog::Photo, catalog: &lcc_catalog::Catalo
 /// in an ordinary packet not projected into `Metadata` (port of upstream PR 3054). Every ordinary JPEG
 /// packet and the extended one are parsed; a packet or chunk stream that can't be fully inspected
 /// fails closed.
-fn original_embeds_xmp_location(bytes: &[u8], label: &str) -> Result<bool, String> {
+///
+/// `is_location` picks the properties that count: [`lcc_meta::is_location_property`], or
+/// [`lcc_meta::is_gps_property`] for a position cleared in the library.
+fn original_embeds_xmp_location(bytes: &[u8], label: &str, is_location: fn(&str) -> bool) -> Result<bool, String> {
     if bytes.starts_with(b"8BPS") {
         return Ok(false);
     }
@@ -2324,17 +2326,7 @@ fn original_embeds_xmp_location(bytes: &[u8], label: &str) -> Result<bool, Strin
         if xmp.properties_truncated {
             return Err(format!("{label}: can't verify location metadata in this original file: embedded XMP property limit was exceeded"));
         }
-        found |= [
-            "exif:GPSLatitude",
-            "exif:GPSLongitude",
-            "exif:GPSAltitude",
-            "photoshop:City",
-            "photoshop:State",
-            "photoshop:Country",
-            "Iptc4xmpCore:Location",
-        ]
-        .into_iter()
-        .any(|key| xmp.properties.get(key).is_some_and(|values| values.iter().any(|v| !v.trim().is_empty())));
+        found |= xmp.properties.iter().any(|(key, values)| is_location(key) && values.iter().any(|v| !v.trim().is_empty()));
     }
     if embedded.chunk_walk_incomplete {
         return Err(format!("{label}: can't verify location metadata in this original file: embedded PNG/WebP chunk stream is incomplete"));
@@ -2557,6 +2549,14 @@ pub(crate) fn prepare_guarded(
         let lcc_catalog::Source::File { path } = &p.source else {
             return Err(format!("{} is a generated demo photo: it has no original file to export", p.file_name));
         };
+        // a movie's location can sit in places no reader here checks in full (QuickTime and
+        // Matroska tags, a camera's GPS track): its file is never copied when it must not carry one
+        if p.video.is_some() && removes_location(p, &session.catalog, o) {
+            return Err(format!(
+                "{}: can't remove the location from a video clip's original file; export it in another format instead, which writes a new movie",
+                p.file_name
+            ));
+        }
         let dng = (o.format == ExportFormat::Dng).then_some(o.dng_compression);
         // the file's bytes; a DNG also decodes the raw data (16-bit samples) and writes it again
         let weight = (p.file_size as usize).saturating_add(if dng.is_some() { full_px.saturating_mul(6) } else { 0 });
@@ -2956,21 +2956,17 @@ impl PreparedExport {
                 };
                 let Some(dng) = dng else {
                     // the file is copied byte for byte: refuse rather than leak a location it embeds
+                    // DNG only for what the DNG export below takes
+                    let instead = || if lcc_raw::probe(&bytes).is_some() { "JPEG, TIFF or DNG" } else { "JPEG or TIFF" };
                     if remove_location {
                         // fail closed: a PSD whose metadata can't be read might hide a location
                         let metadata = lcc_meta::try_extract(&bytes)
                             .map_err(|e| format!("{label}: can't verify location metadata in this original file: {e}"))?;
-                        let embeds_xmp_gps = original_embeds_xmp_location(&bytes, &label)?;
-                        let embeds_place_name =
-                            [metadata.sublocation.as_deref(), metadata.city.as_deref(), metadata.state.as_deref(), metadata.country.as_deref()]
-                                .into_iter()
-                                .flatten()
-                                .any(|value| !value.trim().is_empty());
-                        if metadata.gps.is_some() || embeds_place_name || embeds_xmp_gps || lcc_meta::embeds_location(&bytes) {
-                            // DNG only for what the DNG export below takes
-                            let instead = if lcc_raw::probe(&bytes).is_some() { "JPEG, TIFF or DNG" } else { "JPEG or TIFF" };
+                        let embeds_xmp_location = original_embeds_xmp_location(&bytes, &label, lcc_meta::is_location_property)?;
+                        if metadata.has_location() || embeds_xmp_location || lcc_meta::embeds_location(&bytes) {
                             return Err(format!(
-                                "{label}: can't remove the location from this original file: it contains GPS or place names, or its location metadata could not be fully checked; export as {instead} instead"
+                                "{label}: can't remove the location from this original file: it contains GPS or place names, or its location metadata could not be fully checked; export as {} instead",
+                                instead()
                             ));
                         }
                     }
